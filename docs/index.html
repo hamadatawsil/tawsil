@@ -1,0 +1,206 @@
+﻿<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>لوحة تحكم حماده للتوصيل</title>
+  <link rel="stylesheet" href="style.css?v=20260816-2" />
+</head>
+<body>
+  <div id="login-screen" class="login-wrap hidden">
+    <form id="login-form" class="login-card" autocomplete="off">
+      <div class="login-logo">
+        <img src="logo.png" alt="شعار حماده" onerror="this.style.display='none'" />
+      </div>
+      <h1>لوحة تحكم حماده</h1>
+      <p class="login-sub">الدخول لإدارة الطلبات والاشتراكات</p>
+      <label>اسم المستخدم</label>
+      <input id="login-username" type="text" placeholder="admin" required />
+      <label>كلمة المرور</label>
+      <input id="login-password" type="password" placeholder="••••••••" required />
+      <button type="submit" class="btn-primary" id="login-btn">دخول</button>
+      <p id="login-error" class="error-text hidden"></p>
+    </form>
+  </div>
+
+  <div id="app-screen" class="app hidden">
+    <aside class="sidebar">
+      <div class="side-brand">
+        <img src="logo.png" alt="" onerror="this.style.display='none'" />
+        <strong>حماده للتوصيل</strong>
+        <span>لوحة التحكم</span>
+      </div>
+      <nav class="side-nav">
+        <button class="nav-item active" data-view="dashboard">لوحة الإحصائيات</button>
+        <button class="nav-item" data-view="requests">طلبات الاشتراك</button>
+        <button class="nav-item" data-view="orders">الطلبات</button>
+        <button class="nav-item" data-view="providers">أصحاب التوصيل</button>
+        <button class="nav-item" data-view="customers">الزبائن</button>
+        <button class="nav-item" data-view="activity">سجل النشاط</button>
+        <button class="nav-item" data-view="settings">الإعدادات</button>
+      </nav>
+      <div class="side-user">
+        <div>
+          <strong id="user-name">مدير النظام</strong>
+          <small id="user-role">owner</small>
+        </div>
+        <button id="logout-btn" class="btn-logout">خروج</button>
+      </div>
+    </aside>
+
+    <main class="main">
+      <header class="topbar">
+        <h2 id="view-title">لوحة الإحصائيات</h2>
+        <div class="topbar-actions">
+          <span id="clock" class="clock"></span>
+          <button id="sound-toggle" class="btn-ghost">النغمات: على</button>
+          <button id="refresh-btn" class="btn-ghost">تحديث<span id="event-badge" class="event-badge hidden">0</span></button>
+        </div>
+      </header>
+
+      <section id="view-dashboard" class="view active">
+        <div class="filter-bar">
+          <h3 class="section-title">نظرة عامة</h3>
+          <button class="btn-ghost" data-reload="dashboard">تحديث</button>
+        </div>
+        <div class="stats-grid" id="stats-cards"></div>
+        <div class="two-col">
+          <div class="card">
+            <h3>حالة الطلبات</h3>
+            <div id="orders-breakdown" class="breakdown"></div>
+          </div>
+          <div class="card">
+            <h3>أحدث الأنشطة</h3>
+            <ul id="recent-activity" class="activity-list"></ul>
+          </div>
+        </div>
+      </section>
+
+      <section id="view-requests" class="view">
+        <div class="filter-bar">
+          <div class="seg" id="requests-seg">
+            <button class="seg-btn active" data-status="">الكل</button>
+            <button class="seg-btn" data-status="pending">قيد المراجعة</button>
+            <button class="seg-btn" data-status="needs_resubmission">مطلوب استكمال</button>
+            <button class="seg-btn" data-status="approved">مقبول</button>
+            <button class="seg-btn" data-status="rejected">مرفوض</button>
+          </div>
+          <button class="btn-ghost" data-reload="requests">تحديث</button>
+          <button class="btn-ghost danger" onclick="deleteAllRequests()">حذف الكل</button>
+        </div>
+        <div class="table-card">
+          <table>
+            <thead>
+              <tr>
+                <th>#</th><th>الاسم</th><th>الهاتف</th><th>وسيلة الدفع</th>
+                <th>الوثائق</th><th>التاريخ</th><th>الحالة</th><th>إجراءات</th>
+              </tr>
+            </thead>
+            <tbody id="requests-body"></tbody>
+          </table>
+        </div>
+      </section>
+
+      <section id="view-orders" class="view">
+        <div class="filter-bar">
+          <input id="orders-search" class="search-input" type="text" placeholder="بحث بالاسم أو الحي..." />
+          <div class="seg" id="orders-seg">
+            <button class="seg-btn active" data-status="">الكل</button>
+            <button class="seg-btn" data-status="new">جديد</button>
+            <button class="seg-btn" data-status="accepted">مقبول</button>
+            <button class="seg-btn" data-status="en_route">قيد التوصيل</button>
+            <button class="seg-btn" data-status="completed">مكتمل</button>
+            <button class="seg-btn" data-status="rejected">مرفوض</button>
+          </div>
+          <button class="btn-ghost" data-reload="orders">تحديث</button>
+        </div>
+        <div class="table-card">
+          <table>
+            <thead>
+              <tr>
+                <th>#</th><th>الزبون</th><th>من</th><th>إلى</th>
+                <th>السعر</th><th>صاحب التوصيل</th><th>الحالة</th><th>إجراءات</th>
+              </tr>
+            </thead>
+            <tbody id="orders-body"></tbody>
+          </table>
+        </div>
+      </section>
+
+      <section id="view-providers" class="view">
+        <div class="filter-bar">
+          <h3 class="section-title">أصحاب التوصيل</h3>
+          <button class="btn-ghost" data-reload="providers">تحديث</button>
+        </div>
+        <div class="table-card">
+          <table>
+            <thead>
+              <tr>
+                <th>#</th><th>الاسم</th><th>الهاتف</th><th>اللوحة</th><th>التقييم</th>
+                <th>الحالة</th><th>الاشتراك</th><th>تاريخ الانتهاء</th><th>إجراءات</th>
+              </tr>
+            </thead>
+            <tbody id="providers-body"></tbody>
+          </table>
+        </div>
+      </section>
+
+      <section id="view-customers" class="view">
+        <div class="filter-bar">
+          <h3 class="section-title">الزبائن</h3>
+          <button class="btn-ghost" data-reload="customers">تحديث</button>
+        </div>
+        <div class="table-card">
+          <table>
+            <thead>
+              <tr><th>#</th><th>الاسم</th><th>الهاتف</th><th>تاريخ الانضمام</th><th>عدد الطلبات</th><th>إجراءات</th></tr>
+            </thead>
+            <tbody id="customers-body"></tbody>
+          </table>
+        </div>
+      </section>
+
+      <section id="view-activity" class="view">
+        <div class="filter-bar">
+          <h3 class="section-title">سجل النشاط</h3>
+          <button class="btn-ghost" data-reload="activity">تحديث</button>
+        </div>
+        <div class="card">
+          <ul id="activity-full" class="activity-list"></ul>
+        </div>
+      </section>
+
+      <section id="view-settings" class="view">
+        <div class="card narrow-card">
+          <h3>إعدادات الاشتراك</h3>
+          <form id="subsettings-form">
+            <label>قيمة الاشتراك الشهري (أوقية)</label>
+            <input id="set-fee" type="number" min="0" step="1" required />
+            <label>رقم استقبال تحويلات الدفع</label>
+            <input id="set-phone" type="text" required placeholder="+222 ..." />
+            <label>نص تعليمات التحويل (يظهر في تطبيق صاحب التوصيل)</label>
+            <textarea id="set-note" rows="3" required></textarea>
+            <button type="submit" class="btn-primary">حفظ الإعدادات</button>
+            <p id="subsettings-msg" class="msg-text hidden"></p>
+          </form>
+        </div>
+        <div class="card narrow-card">
+          <h3>تغيير كلمة المرور</h3>
+          <form id="password-form">
+            <label>كلمة المرور الحالية</label>
+            <input id="pw-current" type="password" required />
+            <label>كلمة المرور الجديدة</label>
+            <input id="pw-next" type="password" required minlength="6" />
+            <button type="submit" class="btn-primary">حفظ</button>
+            <p id="pw-msg" class="msg-text hidden"></p>
+          </form>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <div id="modal-root"></div>
+  <div id="toast" class="toast hidden"></div>
+  <script src="app.js?v=20260816-2"></script>
+</body>
+</html>
