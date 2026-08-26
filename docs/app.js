@@ -1,10 +1,10 @@
 ﻿'use strict';
 
-const API = '/api';
-let TOKEN = localStorage.getItem('hamada_token') || '';
+const db = firebase.firestore();
 let ADMIN = null;
 let ordersState = [];
 let providersState = [];
+let customersState = [];
 
 const DOC_LABELS = {
   personal: 'صورة شخصية',
@@ -48,8 +48,6 @@ function toast(msg, isError = false) {
   clearTimeout(toast._t);
   toast._t = setTimeout(() => el.classList.add('hidden'), 2600);
 }
-
-/* ---------- Custom modals (بديل رسائل المتصفح) ---------- */
 
 function openModal({ title, body, foot }) {
   const overlay = document.createElement('div');
@@ -105,8 +103,6 @@ function askConfirm(title, message, onOk, opts = {}) {
   return overlay;
 }
 
-/* ---------- نغمات العمليات الواردة ---------- */
-
 let audioCtx = null;
 let soundEnabled = true;
 
@@ -158,16 +154,13 @@ function playTone(kind) {
   }
 }
 
-/* ---------- التلقي الدوري للعمليات الواردة ---------- */
-
-let lastActivityId = 0;
+let lastActivityTs = null;
 let pollTimer = null;
 
 function startActivityPoller() {
-  lastActivityId = 0;
+  lastActivityTs = new Date();
   stopActivityPoller();
   pollTimer = setInterval(pollActivity, 8000);
-  pollActivity();
 }
 
 function stopActivityPoller() {
@@ -184,12 +177,16 @@ function autoRefreshView(name) {
 
 async function pollActivity() {
   try {
-    const res = await api('/activity/since?after=' + lastActivityId);
-    const current = Number(res.current || 0);
-    if (lastActivityId === 0) { lastActivityId = current; return; }
-    const fresh = (res.rows || []).filter((a) => a.id > lastActivityId && a.admin_name !== ADMIN.full_name);
-    lastActivityId = current;
+    if (!lastActivityTs) return;
+    const snap = await db.collection('activity_log')
+      .where('created_at', '>', lastActivityTs)
+      .orderBy('created_at', 'desc')
+      .limit(20)
+      .get();
+    const fresh = snap.docs.map(d => ({ id: d.id, ...d.data() }))
+      .filter(a => a.admin_name !== ADMIN.full_name);
     if (!fresh.length) return;
+    lastActivityTs = fresh[0].created_at ? fresh[0].created_at.toDate() : new Date();
     fresh.forEach((a) => playTone(toneKind(a.action)));
     const first = fresh[0];
     toast(fresh.length > 1 ? fresh.length + ' عمليات جديدة — ' + first.action : first.action + (first.target ? ': ' + first.target : ''));
@@ -199,19 +196,6 @@ async function pollActivity() {
     const active = document.querySelector('.nav-item.active');
     if (active && active.dataset.view !== 'settings') autoRefreshView(active.dataset.view);
   } catch {}
-}
-
-async function api(path, options = {}) {
-  const headers = { 'Content-Type': 'application/json' };
-  if (TOKEN) headers['Authorization'] = 'Bearer ' + TOKEN;
-  const res = await fetch(API + path, { ...options, headers });
-  if (res.status === 401) {
-    logout();
-    throw new Error('انتهت الجلسة');
-  }
-  const data = await res.json().catch(() => ({}));
-  if (!res.ok) throw new Error(data.error || 'خطأ في الطلب');
-  return data;
 }
 
 function esc(s) {
@@ -224,15 +208,27 @@ function fmtMoney(n) {
   return Number(n || 0).toLocaleString('ar-MA') + ' أوقية';
 }
 
-function fmtDate(iso) {
-  if (!iso) return '—';
-  const d = new Date(iso);
+function fmtDate(val) {
+  if (!val) return '—';
+  const d = val.toDate ? val.toDate() : new Date(val);
   return d.toLocaleDateString('ar-MA', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' });
 }
 
-function fmtDateShort(iso) {
-  if (!iso) return '—';
-  return new Date(iso).toLocaleDateString('ar-MA');
+function fmtDateShort(val) {
+  if (!val) return '—';
+  const d = val.toDate ? val.toDate() : new Date(val);
+  return d.toLocaleDateString('ar-MA');
+}
+
+async function logActivity(action, target) {
+  try {
+    await db.collection('activity_log').add({
+      admin_name: ADMIN.full_name,
+      action,
+      target: target || '',
+      created_at: firebase.firestore.FieldValue.serverTimestamp(),
+    });
+  } catch {}
 }
 
 /* ---------- Login ---------- */
@@ -243,10 +239,13 @@ async function handleLogin(e) {
   const password = $('#login-password').value;
   $('#login-btn').textContent = 'جاري الدخول...';
   try {
-    const res = await api('/auth/login', { method: 'POST', body: JSON.stringify({ username, password }) });
-    TOKEN = res.token;
-    ADMIN = res.admin;
-    localStorage.setItem('hamada_token', TOKEN);
+    const snap = await db.collection('admins').where('username', '==', username).limit(1).get();
+    if (snap.empty) throw new Error('اسم المستخدم أو كلمة المرور غير صحيحة');
+    const doc = snap.docs[0];
+    const data = doc.data();
+    if (data.password !== password) throw new Error('اسم المستخدم أو كلمة المرور غير صحيحة');
+    ADMIN = { id: doc.id, username: data.username, full_name: data.full_name, role: data.role };
+    localStorage.setItem('hamada_admin', JSON.stringify(ADMIN));
     enterApp();
   } catch (err) {
     $('#login-error').textContent = err.message;
@@ -257,10 +256,9 @@ async function handleLogin(e) {
 }
 
 function logout() {
-  TOKEN = '';
   ADMIN = null;
   stopActivityPoller();
-  localStorage.removeItem('hamada_token');
+  localStorage.removeItem('hamada_admin');
   $('#login-screen').classList.remove('hidden');
   $('#app-screen').classList.add('hidden');
   $('#login-password').value = '';
@@ -321,15 +319,43 @@ const STAT_META = [
 ];
 
 async function loadDashboard() {
-  const [stats, activity] = await Promise.all([api('/stats'), api('/activity')]);
+  const now = new Date();
+  const todayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+
+  const [ordersSnap, pendingSnap, providersSnap, customersSnap, activitySnap] = await Promise.all([
+    db.collection('orders').get(),
+    db.collection('subscription_requests').where('status', '==', 'pending').get(),
+    db.collection('providers').get(),
+    db.collection('customers').get(),
+    db.collection('activity_log').orderBy('created_at', 'desc').limit(20).get(),
+  ]);
+
+  const allOrders = ordersSnap.docs.map(d => d.data());
+  const ordersToday = allOrders.filter(o => {
+    if (!o.created_at) return false;
+    const d = o.created_at.toDate ? o.created_at.toDate() : new Date(o.created_at);
+    return d >= todayStart;
+  });
+
+  const revenueToday = ordersToday.filter(o => o.status === 'completed').reduce((s, o) => s + (Number(o.total) || 0), 0);
+  const revenue = allOrders.filter(o => o.status === 'completed').reduce((s, o) => s + (Number(o.total) || 0), 0);
+  const activeProviders = providersSnap.docs.filter(d => d.data().is_connected).length;
+
+  const stats = {
+    orders_today: ordersToday.length,
+    pending_requests: pendingSnap.size,
+    active_providers: activeProviders,
+    orders_total: allOrders.length,
+    customers: customersSnap.size,
+    providers: providersSnap.size,
+    revenue_today: revenueToday,
+    revenue: revenue,
+  };
+
   const grid = $('#stats-cards');
   grid.innerHTML = '';
   const cards = [
-    ...STAT_META.map((m) => {
-      const v = stats[m.key];
-      const sub = m.key === 'revenue_today' ? '' : m.sub;
-      return { ...m, value: v, sub };
-    }),
+    ...STAT_META.map((m) => ({ ...m, value: stats[m.key] })),
     { label: 'إيرادات اليوم', value: stats.revenue_today, sub: 'أوقية جديدة', cls: 'gold' },
     { label: 'إجمالي الإيرادات', value: stats.revenue, sub: 'أوقية', cls: 'gold' },
   ];
@@ -344,13 +370,11 @@ async function loadDashboard() {
     grid.appendChild(div);
   });
 
-  const breakdownEl = $('.two-col #orders-breakdown, .breakdown');
   const bdContainer = $('#view-dashboard .two-col .card:nth-child(1) .breakdown');
   const statuses = ['new', 'accepted', 'en_route', 'completed', 'rejected'];
-  const statusCounts = await api('/orders?limit=500');
   const counts = {};
   statuses.forEach((s) => (counts[s] = 0));
-  statusCounts.forEach((o) => (counts[o.status] = (counts[o.status] || 0) + 1));
+  allOrders.forEach((o) => { if (counts[o.status] !== undefined) counts[o.status]++; });
   const max = Math.max(1, ...Object.values(counts));
   bdContainer.innerHTML = '';
   statuses.forEach((s) => {
@@ -363,12 +387,12 @@ async function loadDashboard() {
     bdContainer.appendChild(row);
   });
 
+  const activity = activitySnap.docs.map(d => ({ id: d.id, ...d.data() }));
   const recent = $('#view-dashboard .two-col .card:nth-child(2) .activity-list');
   recent.innerHTML = activity
     .slice(0, 6)
     .map((a) => '<li>' + esc(a.action) + ' <span class="act-time">' + esc(a.target) + ' — ' + fmtDate(a.created_at) + '</span></li>')
     .join('') || '<li>لا يوجد نشاط بعد</li>';
-  void breakdownEl;
 }
 
 /* ---------- Requests ---------- */
@@ -377,7 +401,10 @@ let requestsFilter = '';
 let requestsState = [];
 
 async function loadRequests() {
-  requestsState = await api('/subscription-requests' + (requestsFilter ? '?status=' + requestsFilter : ''));
+  let ref = db.collection('subscription_requests');
+  if (requestsFilter) ref = ref.where('status', '==', requestsFilter);
+  const snap = await ref.orderBy('created_at', 'desc').get();
+  requestsState = snap.docs.map(d => ({ id: d.id, ...d.data() }));
   const body = $('#requests-body');
   if (!requestsState.length) {
     body.innerHTML = '<tr class="empty-row"><td colspan="8">لا توجد طلبات</td></tr>';
@@ -386,7 +413,8 @@ async function loadRequests() {
   body.innerHTML = requestsState
     .map((r) => {
       let docs = [];
-      try { docs = JSON.parse(r.documents || '[]'); } catch {}
+      if (Array.isArray(r.documents)) docs = r.documents;
+      else try { docs = JSON.parse(r.documents || '[]'); } catch {}
       const docChips = docs
         .map((d) => {
           const label = esc(DOC_LABELS[d.category] || d.category || 'وثيقة');
@@ -401,14 +429,14 @@ async function loadRequests() {
       let actions = '<div class="row-actions">';
       if (r.status === 'pending') {
         actions +=
-          '<button class="btn-sm blue" onclick="openReviewDocs(' + r.id + ')">مراجعة الأوراق</button>' +
-          '<button class="btn-sm ok" onclick="reviewRequest(' + r.id + ',\'approve\')">قبول</button>' +
-          '<button class="btn-sm no" onclick="reviewRequest(' + r.id + ',\'reject\')">رفض</button>';
+          '<button class="btn-sm blue" onclick="openReviewDocs(\'' + r.id + '\')">مراجعة الأوراق</button>' +
+          '<button class="btn-sm ok" onclick="reviewRequest(\'' + r.id + '\',\'approve\')">قبول</button>' +
+          '<button class="btn-sm no" onclick="reviewRequest(\'' + r.id + '\',\'reject\')">رفض</button>';
       }
-      actions += '<button class="btn-sm no" onclick="deleteRequest(' + r.id + ')">حذف</button></div>';
+      actions += '<button class="btn-sm no" onclick="deleteRequest(\'' + r.id + '\')">حذف</button></div>';
       return (
         '<tr>' +
-        '<td>' + r.id + '</td>' +
+        '<td style="font-size:11px;max-width:80px;overflow:hidden;text-overflow:ellipsis" title="' + esc(r.id) + '">' + esc(r.id.substring(0, 8)) + '</td>' +
         '<td><strong>' + esc(r.name) + '</strong></td>' +
         '<td>' + esc(r.phone) + '</td>' +
         '<td>' + esc(PAY_LABELS[r.payment_method] || r.payment_method || '—') + '</td>' +
@@ -426,14 +454,14 @@ function deleteRequest(id) {
   const r = requestsState.find((x) => x.id === id);
   askConfirm(
     'حذف طلب الاشتراك',
-    'هل تريد حذف طلب الاشتراك #' + id + (r ? ' لـ "' + esc(r.name) + '"' : '') + ' نهائياً؟<br>لن يستطيع أحد عرضه بعد الآن.',
-    () => {
-      api('/subscription-requests/' + id + '/delete', { method: 'POST', body: JSON.stringify({}) })
-        .then(() => {
-          toast('تم حذف طلب الاشتراك #' + id);
-          loadRequests();
-        })
-        .catch((err) => toast(err.message, true));
+    'هل تريد حذف طلب الاشتراك "' + (r ? esc(r.name) : id.substring(0, 8)) + '" نهائياً؟<br>لن يستطيع أحد عرضه بعد الآن.',
+    async () => {
+      try {
+        await db.collection('subscription_requests').doc(id).delete();
+        await logActivity('حذف طلب اشتراك', r ? r.name : '');
+        toast('تم حذف طلب الاشتراك');
+        loadRequests();
+      } catch (err) { toast(err.message, true); }
     },
     { danger: true, confirm: 'حذف' }
   );
@@ -443,14 +471,17 @@ function deleteAllRequests() {
   askConfirm(
     'حذف كل طلبات الاشتراك',
     'هل تريد حذف جميع طلبات الاشتراك نهائياً؟<br>لا يمكن التراجع عن هذه العملية.',
-    () => {
-      api('/subscription-requests/delete-all', { method: 'POST', body: JSON.stringify({}) })
-        .then((res) => {
-          toast('تم حذف ' + (res && res.deleted ? res.deleted : 0) + ' طلب اشتراك');
-          loadRequests();
-          if (!requestsFilter) loadView('dashboard');
-        })
-        .catch((err) => toast(err.message, true));
+    async () => {
+      try {
+        const snap = await db.collection('subscription_requests').get();
+        const batch = db.batch();
+        snap.docs.forEach(d => batch.delete(d.ref));
+        await batch.commit();
+        await logActivity('حذف كل طلبات الاشتراك', snap.size + ' طلب');
+        toast('تم حذف ' + snap.size + ' طلب اشتراك');
+        loadRequests();
+        if (!requestsFilter) loadView('dashboard');
+      } catch (err) { toast(err.message, true); }
     },
     { danger: true, confirm: 'حذف الكل' }
   );
@@ -473,14 +504,67 @@ function reviewRequest(id, action) {
   askText(
     isApprove ? 'قبول الاشتراك' : 'رفض الاشتراك',
     isApprove ? 'ملاحظة القبول (اختياري):' : 'سبب الرفض (مطلوب):',
-    (note) => {
-      api('/subscription-requests/' + id + '/' + action, { method: 'POST', body: JSON.stringify({ note }) })
-        .then(() => {
-          toast(isApprove ? 'تم قبول الاشتراك وإنشاء الحساب' : 'تم رفض الاشتراك');
-          loadRequests();
-          if (requestsFilter === 'pending' || !requestsFilter) loadView('dashboard');
-        })
-        .catch((err) => toast(err.message, true));
+    async (note) => {
+      try {
+        if (isApprove) {
+          const reqDoc = await db.collection('subscription_requests').doc(id).get();
+          const req = reqDoc.data();
+          const now = firebase.firestore.FieldValue.serverTimestamp();
+          const endDate = new Date(Date.now() + 365 * 24 * 3600 * 1000);
+
+          let existingProvider = null;
+          const provSnap = await db.collection('providers').where('phone', '==', req.phone).limit(1).get();
+          if (!provSnap.empty) existingProvider = provSnap.docs[0];
+
+          if (existingProvider) {
+            await existingProvider.ref.update({
+              subscription_active: true,
+              subscription_start: now,
+              subscription_end: endDate,
+            });
+          } else {
+            await db.collection('providers').add({
+              name: req.name,
+              phone: req.phone,
+              password: req.password || '',
+              plate: '',
+              rating: 0,
+              is_connected: false,
+              subscription_active: true,
+              subscription_start: now,
+              subscription_end: endDate,
+              blocked: false,
+              created_at: now,
+            });
+          }
+
+          let docs = [];
+          if (Array.isArray(req.documents)) docs = req.documents;
+          docs = docs.map(d => ({ ...d, status: 'accepted' }));
+
+          await db.collection('subscription_requests').doc(id).update({
+            status: 'approved',
+            documents: docs,
+            review_note: note || '',
+            reviewed_by: ADMIN.full_name,
+            reviewed_at: now,
+          });
+          await logActivity('قبول اشتراك', req.name);
+          toast('تم قبول الاشتراك وإنشاء الحساب');
+        } else {
+          await db.collection('subscription_requests').doc(id).update({
+            status: 'rejected',
+            review_note: note,
+            reviewed_by: ADMIN.full_name,
+            reviewed_at: firebase.firestore.FieldValue.serverTimestamp(),
+          });
+          const r = requestsState.find(x => x.id === id);
+          await logActivity('رفض اشتراك', r ? r.name : '');
+          toast('تم رفض الاشتراك');
+        }
+        loadRequests();
+        if (requestsFilter === 'pending' || !requestsFilter) loadView('dashboard');
+      } catch (err) { toast(err.message, true); }
     },
     { required: !isApprove, confirm: isApprove ? 'قبول' : 'رفض' }
   );
@@ -489,49 +573,48 @@ function reviewRequest(id, action) {
 let currentReviewId = null;
 
 function openReviewDocs(id) {
-  api('/subscription-requests').then((rows) => {
-    const r = rows.find((x) => x.id === id);
-    if (!r) return toast('لم يتم العثور على الطلب', true);
-    let docs = [];
-    try { docs = JSON.parse(r.documents || '[]'); } catch {}
-    currentReviewId = id;
-    const items = docs
-      .map((d, i) => {
-        const label = esc(DOC_LABELS[d.category] || d.category || 'وثيقة');
-        const st = d.status || 'pending';
-        const img = d.data
-          ? '<img class="rv-img" src="data:image/jpeg;base64,' + esc(d.data) + '" onclick="openDocImage(this.src, \'' + label + '\')">'
-          : '<div class="rv-empty">لا صورة</div>';
-        const note = esc(d.note || '');
-        return (
-          '<div class="rv-item" data-cat="' + esc(d.category) + '">' +
-          '<div class="rv-imgbox">' + img + '</div>' +
-          '<div class="rv-meta">' +
-          '<strong>' + label + '</strong>' +
-          '<div class="rv-btns">' +
-          '<label class="rv-opt ' + (st === 'accepted' ? 'on ok' : '') + '" onclick="rvSelect(this)"><input type="radio" name="rv-' + i + '" value="accepted" ' + (st === 'accepted' ? 'checked' : '') + '> معتمدة</label>' +
-          '<label class="rv-opt ' + (st === 'rejected' ? 'on no' : '') + '" onclick="rvSelect(this)"><input type="radio" name="rv-' + i + '" value="rejected" ' + (st === 'rejected' ? 'checked' : '') + '> مرفوضة</label>' +
-          '</div>' +
-          '<input class="rv-note ' + (st === 'rejected' ? '' : 'hidden') + '" placeholder="سبب الرفض (منتهية الصلاحية / صورة غير مطابقة...)" value="' + note + '">' +
-          '</div>' +
-          '</div>'
-        );
-      })
-      .join('');
-    const overlay = document.createElement('div');
-    overlay.className = 'doc-lightbox';
-    overlay.innerHTML =
-      '<div class="rv-modal">' +
-      '<div class="doc-lightbox-head">مراجعة وثائق: ' + esc(r.name) + '<button class="btn-sm" onclick="this.closest(\'.doc-lightbox\').remove()">إغلاق</button></div>' +
-      '<div class="rv-body">' + items + '</div>' +
-      '<div class="rv-foot">' +
-      '<span class="rv-hint">قبل/ارفض كل ورقة على حدة</span>' +
-      '<button class="btn-primary rv-save" onclick="saveReviewDocs(this)">حفظ المراجعة</button>' +
-      '</div>' +
-      '</div>';
-    overlay.onclick = (e) => { if (e.target === overlay) overlay.remove(); };
-    document.body.appendChild(overlay);
-  });
+  const r = requestsState.find(x => x.id === id);
+  if (!r) return toast('لم يتم العثور على الطلب', true);
+  let docs = [];
+  if (Array.isArray(r.documents)) docs = r.documents;
+  else try { docs = JSON.parse(r.documents || '[]'); } catch {}
+  currentReviewId = id;
+  const items = docs
+    .map((d, i) => {
+      const label = esc(DOC_LABELS[d.category] || d.category || 'وثيقة');
+      const st = d.status || 'pending';
+      const img = d.data
+        ? '<img class="rv-img" src="data:image/jpeg;base64,' + esc(d.data) + '" onclick="openDocImage(this.src, \'' + label + '\')">'
+        : '<div class="rv-empty">لا صورة</div>';
+      const note = esc(d.note || '');
+      return (
+        '<div class="rv-item" data-cat="' + esc(d.category) + '">' +
+        '<div class="rv-imgbox">' + img + '</div>' +
+        '<div class="rv-meta">' +
+        '<strong>' + label + '</strong>' +
+        '<div class="rv-btns">' +
+        '<label class="rv-opt ' + (st === 'accepted' ? 'on ok' : '') + '" onclick="rvSelect(this)"><input type="radio" name="rv-' + i + '" value="accepted" ' + (st === 'accepted' ? 'checked' : '') + '> معتمدة</label>' +
+        '<label class="rv-opt ' + (st === 'rejected' ? 'on no' : '') + '" onclick="rvSelect(this)"><input type="radio" name="rv-' + i + '" value="rejected" ' + (st === 'rejected' ? 'checked' : '') + '> مرفوضة</label>' +
+        '</div>' +
+        '<input class="rv-note ' + (st === 'rejected' ? '' : 'hidden') + '" placeholder="سبب الرفض (منتهية الصلاحية / صورة غير مطابقة...)" value="' + note + '">' +
+        '</div>' +
+        '</div>'
+      );
+    })
+    .join('');
+  const overlay = document.createElement('div');
+  overlay.className = 'doc-lightbox';
+  overlay.innerHTML =
+    '<div class="rv-modal">' +
+    '<div class="doc-lightbox-head">مراجعة وثائق: ' + esc(r.name) + '<button class="btn-sm" onclick="this.closest(\'.doc-lightbox\').remove()">إغلاق</button></div>' +
+    '<div class="rv-body">' + items + '</div>' +
+    '<div class="rv-foot">' +
+    '<span class="rv-hint">قبل/ارفض كل ورقة على حدة</span>' +
+    '<button class="btn-primary rv-save" onclick="saveReviewDocs(this)">حفظ المراجعة</button>' +
+    '</div>' +
+    '</div>';
+  overlay.onclick = (e) => { if (e.target === overlay) overlay.remove(); };
+  document.body.appendChild(overlay);
 }
 
 function rvSelect(lbl) {
@@ -544,30 +627,51 @@ function rvSelect(lbl) {
   if (note) note.classList.toggle('hidden', !input || input.value !== 'rejected');
 }
 
-function saveReviewDocs(btn) {
+async function saveReviewDocs(btn) {
   const modal = btn.closest('.rv-modal');
   const docs = [];
+  let allAccepted = true;
   modal.querySelectorAll('.rv-item').forEach((item) => {
     const checked = item.querySelector('input:checked');
     const noteInp = item.querySelector('.rv-note');
     const status = checked ? checked.value : 'pending';
     const entry = { category: item.dataset.cat, status };
     if (status === 'rejected' && noteInp) entry.note = noteInp.value.trim();
+    if (status !== 'accepted') allAccepted = false;
     docs.push(entry);
   });
   btn.disabled = true;
-  api('/subscription-requests/' + currentReviewId + '/docs-review', {
-    method: 'POST',
-    body: JSON.stringify({ docs }),
-  })
-    .then((res) => {
-      const status = res && res.request ? res.request.status : (res ? res.status : '');
-      toast(status === 'approved' ? 'تم اعتماد الاشتراك تلقائياً وإنشاء الحساب' : 'تم حفظ مراجعة الوثائق');
-      modal.closest('.doc-lightbox').remove();
-      loadRequests();
-      if (requestsFilter === 'pending' || !requestsFilter) loadView('dashboard');
-    })
-    .catch((err) => { btn.disabled = false; toast(err.message, true); });
+  try {
+    const newStatus = allAccepted ? 'approved' : 'needs_resubmission';
+    const update = {
+      documents: docs,
+      status: newStatus,
+      reviewed_by: ADMIN.full_name,
+      reviewed_at: firebase.firestore.FieldValue.serverTimestamp(),
+    };
+    if (newStatus === 'approved') {
+      const reqDoc = await db.collection('subscription_requests').doc(currentReviewId).get();
+      const req = reqDoc.data();
+      const now = firebase.firestore.FieldValue.serverTimestamp();
+      const endDate = new Date(Date.now() + 365 * 24 * 3600 * 1000);
+      const provSnap = await db.collection('providers').where('phone', '==', req.phone).limit(1).get();
+      if (!provSnap.empty) {
+        await provSnap.docs[0].ref.update({ subscription_active: true, subscription_start: now, subscription_end: endDate });
+      } else {
+        await db.collection('providers').add({
+          name: req.name, phone: req.phone, password: req.password || '', plate: '', rating: 0,
+          is_connected: false, subscription_active: true, subscription_start: now, subscription_end: endDate,
+          blocked: false, created_at: now,
+        });
+      }
+      await logActivity('قبول اشتراك', req.name);
+    }
+    await db.collection('subscription_requests').doc(currentReviewId).update(update);
+    toast(allAccepted ? 'تم اعتماد الاشتراك تلقائياً وإنشاء الحساب' : 'تم حفظ مراجعة الوثائق');
+    modal.closest('.doc-lightbox').remove();
+    loadRequests();
+    if (requestsFilter === 'pending' || !requestsFilter) loadView('dashboard');
+  } catch (err) { btn.disabled = false; toast(err.message, true); }
 }
 
 /* ---------- Orders ---------- */
@@ -576,7 +680,14 @@ let ordersFilter = '';
 
 async function loadOrders() {
   const q = ($('#orders-search') ? $('#orders-search').value : '').trim();
-  const rows = await api('/orders?limit=500' + (ordersFilter ? '&status=' + ordersFilter : '') + (q ? '&q=' + encodeURIComponent(q) : ''));
+  let ref = db.collection('orders');
+  if (ordersFilter) ref = ref.where('status', '==', ordersFilter);
+  const snap = await ref.orderBy('created_at', 'desc').limit(500).get();
+  let rows = snap.docs.map(d => ({ id: d.id, ...d.data() }));
+  if (q) {
+    const ql = q.toLowerCase();
+    rows = rows.filter(o => (o.customer_name || '').toLowerCase().includes(ql) || (o.from_area || '').toLowerCase().includes(ql) || (o.to_area || '').toLowerCase().includes(ql));
+  }
   ordersState = rows;
   const body = $('#orders-body');
   if (!rows.length) {
@@ -589,13 +700,13 @@ async function loadOrders() {
       const next = nextMap[o.status];
       const actions =
         o.status === 'new'
-          ? '<button class="btn-sm ok" onclick="changeOrderStatus(' + o.id + ',\'accepted\')">قبول</button>'
+          ? '<button class="btn-sm ok" onclick="changeOrderStatus(\'' + o.id + '\',\'accepted\')">قبول</button>'
           : next
-          ? '<button class="btn-sm blue" onclick="changeOrderStatus(' + o.id + ',\'' + next + '\')">' + (next === 'completed' ? 'إنهاء' : 'التالي') + '</button>'
+          ? '<button class="btn-sm blue" onclick="changeOrderStatus(\'' + o.id + '\',\'' + next + '\')">' + (next === 'completed' ? 'إنهاء' : 'التالي') + '</button>'
           : '<span class="badge ' + o.status + '">' + esc(STATUS_LABELS[o.status]) + '</span>';
       return (
         '<tr>' +
-        '<td>' + o.id + '</td>' +
+        '<td style="font-size:11px;max-width:80px;overflow:hidden;text-overflow:ellipsis" title="' + esc(o.id) + '">' + esc(o.id.substring(0, 8)) + '</td>' +
         '<td><strong>' + esc(o.customer_name) + '</strong></td>' +
         '<td>' + esc(o.from_area) + '</td>' +
         '<td>' + esc(o.to_area) + '</td>' +
@@ -603,11 +714,11 @@ async function loadOrders() {
         '<td>' + (o.provider_name ? esc(o.provider_name) : '<span class="badge new">غير مسند</span>') + '</td>' +
         '<td><span class="badge ' + o.status + '">' + esc(STATUS_LABELS[o.status]) + '</span></td>' +
         '<td><div class="row-actions">' +
-        (o.status === 'new' ? '<button class="btn-sm blue" onclick="assignOrder(' + o.id + ')">إسناد</button>' : '') +
+        (o.status === 'new' ? '<button class="btn-sm blue" onclick="assignOrder(\'' + o.id + '\')">إسناد</button>' : '') +
         actions +
-        (o.status === 'rejected' ? '<button class="btn-sm ok" onclick="changeOrderStatus(' + o.id + ',\'accepted\')">إعادة</button>' : '') +
-        '<button class="btn-sm blue" onclick="editOrder(' + o.id + ')">تعديل</button>' +
-        '<button class="btn-sm no" onclick="deleteOrder(' + o.id + ')">حذف</button>' +
+        (o.status === 'rejected' ? '<button class="btn-sm ok" onclick="changeOrderStatus(\'' + o.id + '\',\'accepted\')">إعادة</button>' : '') +
+        '<button class="btn-sm blue" onclick="editOrder(\'' + o.id + '\')">تعديل</button>' +
+        '<button class="btn-sm no" onclick="deleteOrder(\'' + o.id + '\')">حذف</button>' +
         '</div></td>' +
         '</tr>'
       );
@@ -617,13 +728,12 @@ async function loadOrders() {
 
 async function changeOrderStatus(id, status) {
   try {
-    await api('/orders/status', { method: 'POST', body: JSON.stringify({ id, status }) });
-    toast('تم تحديث الطلب #' + id);
+    await db.collection('orders').doc(id).update({ status });
+    await logActivity('تغيير حالة الطلب', id.substring(0, 8) + ' ← ' + (STATUS_LABELS[status] || status));
+    toast('تم تحديث الطلب');
     loadOrders();
     loadDashboard();
-  } catch (err) {
-    toast(err.message, true);
-  }
+  } catch (err) { toast(err.message, true); }
 }
 
 function assignOrder(id) {
@@ -635,7 +745,7 @@ function assignOrder(id) {
     .map((p) => '<option value="' + p.id + '">' + esc(p.name) + ' — ' + esc(p.phone) + '</option>')
     .join('');
   const overlay = openModal({
-    title: 'إسناد الطلب #' + id,
+    title: 'إسناد الطلب',
     body: '<select id="assign-provider" class="modal-input">' + options + '</select>',
     foot:
       '<button class="modal-btn ghost" data-close>إلغاء</button>' +
@@ -643,16 +753,20 @@ function assignOrder(id) {
   });
   const sel = overlay.querySelector('#assign-provider');
   sel.focus();
-  overlay.querySelector('[data-submit]').addEventListener('click', () => {
-    const provId = Number(sel.value);
+  overlay.querySelector('[data-submit]').addEventListener('click', async () => {
+    const provId = sel.value;
     const prov = providersState.find((x) => x.id === provId);
     overlay.remove();
-    api('/orders/assign', { method: 'POST', body: JSON.stringify({ id, provider_id: provId }) })
-      .then(() => {
-        toast('تم إسناد الطلب إلى ' + prov.name);
-        loadOrders();
-      })
-      .catch((err) => toast(err.message, true));
+    try {
+      await db.collection('orders').doc(id).update({
+        provider_id: provId,
+        provider_name: prov.name,
+        status: 'accepted',
+      });
+      await logActivity('إسناد طلب', id.substring(0, 8) + ' → ' + prov.name);
+      toast('تم إسناد الطلب إلى ' + prov.name);
+      loadOrders();
+    } catch (err) { toast(err.message, true); }
   });
   overlay.querySelector('[data-close]').addEventListener('click', () => overlay.remove());
 }
@@ -669,7 +783,7 @@ function editOrder(id) {
     .map((k) => '<option value="' + k + '"' + (o.status === k ? ' selected' : '') + '>' + esc(STATUS_LABELS[k]) + '</option>')
     .join('');
   const overlay = openModal({
-    title: 'تعديل الرحلة #' + id,
+    title: 'تعديل الرحلة',
     body:
       '<label class="modal-label">اسم الزبون</label>' +
       '<input id="eo-name" class="modal-input" type="text" value="' + esc(o.customer_name) + '">' +
@@ -687,14 +801,13 @@ function editOrder(id) {
       '<button class="modal-btn ghost" data-close>إلغاء</button>' +
       '<button class="modal-btn ok" data-submit>حفظ التعديل</button>',
   });
-  const save = () => {
+  const save = async () => {
     const price = Number(overlay.querySelector('#eo-total').value);
     if (!Number.isFinite(price) || price < 100 || price > 250) {
       toast('سعر الرحلة يجب أن يكون بين 100 و 250 أوقية', true);
       return;
     }
-    const body = {
-      id,
+    const updateData = {
       customer_name: overlay.querySelector('#eo-name').value.trim(),
       from_area: overlay.querySelector('#eo-from').value.trim(),
       to_area: overlay.querySelector('#eo-to').value.trim(),
@@ -703,9 +816,13 @@ function editOrder(id) {
       status: overlay.querySelector('#eo-status').value,
     };
     overlay.remove();
-    api('/orders/update', { method: 'POST', body: JSON.stringify(body) })
-      .then(() => { toast('تم حفظ تعديل الرحلة'); loadOrders(); loadDashboard(); })
-      .catch((err) => toast(err.message, true));
+    try {
+      await db.collection('orders').doc(id).update(updateData);
+      await logActivity('تعديل رحلة', id.substring(0, 8));
+      toast('تم حفظ تعديل الرحلة');
+      loadOrders();
+      loadDashboard();
+    } catch (err) { toast(err.message, true); }
   };
   overlay.querySelector('[data-submit]').addEventListener('click', save);
   overlay.querySelector('[data-close]').addEventListener('click', () => overlay.remove());
@@ -713,14 +830,17 @@ function editOrder(id) {
 
 function deleteOrder(id) {
   const o = ordersState.find((x) => x.id === id);
-  if (!o) return;
   askConfirm(
     'حذف الرحلة',
-    'هل تريد حذف الرحلة #' + id + ' لـ "' + esc(o.customer_name) + '" نهائياً؟<br>لن يستطيع أحد عرضها بعد الآن.',
-    () => {
-      api('/orders/delete', { method: 'POST', body: JSON.stringify({ id }) })
-        .then(() => { toast('تم حذف الرحلة'); loadOrders(); loadDashboard(); })
-        .catch((err) => toast(err.message, true));
+    'هل تريد حذف الرحلة لـ "' + esc(o ? o.customer_name : '') + '" نهائياً؟<br>لن يستطيع أحد عرضها بعد الآن.',
+    async () => {
+      try {
+        await db.collection('orders').doc(id).delete();
+        await logActivity('حذف رحلة', o ? o.customer_name : '');
+        toast('تم حذف الرحلة');
+        loadOrders();
+        loadDashboard();
+      } catch (err) { toast(err.message, true); }
     },
     { danger: true, confirm: 'حذف نهائي' }
   );
@@ -729,32 +849,32 @@ function deleteOrder(id) {
 /* ---------- Providers ---------- */
 
 async function loadProviders() {
-  const rows = await api('/providers');
-  providersState = rows;
+  const snap = await db.collection('providers').get();
+  providersState = snap.docs.map(d => ({ id: d.id, ...d.data() }));
   const body = $('#providers-body');
-  if (!rows.length) {
+  if (!providersState.length) {
     body.innerHTML = '<tr class="empty-row"><td colspan="9">لا يوجد أصحاب توصيل</td></tr>';
     return;
   }
-  body.innerHTML = rows
+  body.innerHTML = providersState
     .map((p) =>
       '<tr>' +
-      '<td>' + p.id + '</td>' +
+      '<td style="font-size:11px;max-width:80px;overflow:hidden;text-overflow:ellipsis" title="' + esc(p.id) + '">' + esc(p.id.substring(0, 8)) + '</td>' +
       '<td><strong>' + esc(p.name) + '</strong>' +
       (p.blocked ? ' <span class="badge rejected">محظور</span>' : '') +
       '</td>' +
       '<td>' + esc(p.phone) + '</td>' +
-      '<td>' + esc(p.plate) + '</td>' +
-      '<td>★ ' + esc(p.rating) + '</td>' +
+      '<td>' + esc(p.plate || '') + '</td>' +
+      '<td>★ ' + esc(p.rating || 0) + '</td>' +
       '<td><span class="badge ' + (p.is_connected ? 'online' : 'offline') + '">' + (p.is_connected ? 'متصل' : 'غير متصل') + '</span></td>' +
       '<td><span class="badge ' + (p.subscription_active ? 'active' : 'inactive') + '">' + (p.subscription_active ? 'نشط' : 'موقوف') + '</span></td>' +
       '<td>' + fmtDateShort(p.subscription_end) + '</td>' +
       '<td><div class="row-actions">' +
-      '<button class="btn-sm blue" onclick="editProvider(' + p.id + ')">تعديل</button>' +
-      '<button class="btn-sm blue" onclick="toggleProvider(' + p.id + ',\'toggle-connection\')">' + (p.is_connected ? 'إيقاف الاتصال' : 'تفعيل الاتصال') + '</button>' +
-      '<button class="btn-sm ' + (p.subscription_active ? 'no' : 'ok') + '" onclick="toggleProvider(' + p.id + ',\'toggle-subscription\')">' + (p.subscription_active ? 'إيقاف الاشتراك' : 'تفعيل الاشتراك') + '</button>' +
-      '<button class="btn-sm ' + (p.blocked ? 'ok' : 'no') + '" onclick="toggleProvider(' + p.id + ',\'toggle-block\')">' + (p.blocked ? 'رفع الحظر' : 'حظر') + '</button>' +
-      '<button class="btn-sm no" onclick="deleteProvider(' + p.id + ')">حذف</button>' +
+      '<button class="btn-sm blue" onclick="editProvider(\'' + p.id + '\')">تعديل</button>' +
+      '<button class="btn-sm blue" onclick="toggleProvider(\'' + p.id + '\',\'is_connected\')">' + (p.is_connected ? 'إيقاف الاتصال' : 'تفعيل الاتصال') + '</button>' +
+      '<button class="btn-sm ' + (p.subscription_active ? 'no' : 'ok') + '" onclick="toggleProvider(\'' + p.id + '\',\'subscription_active\')">' + (p.subscription_active ? 'إيقاف الاشتراك' : 'تفعيل الاشتراك') + '</button>' +
+      '<button class="btn-sm ' + (p.blocked ? 'ok' : 'no') + '" onclick="toggleProvider(\'' + p.id + '\',\'blocked\')">' + (p.blocked ? 'رفع الحظر' : 'حظر') + '</button>' +
+      '<button class="btn-sm no" onclick="deleteProvider(\'' + p.id + '\')">حذف</button>' +
       '</div></td>' +
       '</tr>'
     )
@@ -778,161 +898,162 @@ function editProvider(id) {
     '<input id="ep-plate" type="text" value="' + esc(p.plate || '') + '">' +
     '</div>' +
     '<div class="rv-foot">' +
-    '<button class="btn-primary rv-save" onclick="saveProvider(this,' + id + ')">حفظ التعديل</button>' +
+    '<button class="btn-primary rv-save" onclick="saveProvider(this,\'' + id + '\')">حفظ التعديل</button>' +
     '</div>' +
     '</div>';
   overlay.onclick = (e) => { if (e.target === overlay) overlay.remove(); };
   document.body.appendChild(overlay);
 }
 
-function saveProvider(btn, id) {
+async function saveProvider(btn, id) {
   const overlay = btn.closest('.doc-lightbox');
   const name = overlay.querySelector('#ep-name').value.trim();
   const phone = overlay.querySelector('#ep-phone').value.trim();
   const plate = overlay.querySelector('#ep-plate').value.trim();
   if (!name || !phone) return toast('الاسم والهاتف مطلوبان', true);
   btn.disabled = true;
-  api('/providers/' + id + '/update', {
-    method: 'POST',
-    body: JSON.stringify({ name, phone, plate }),
-  })
-    .then(() => {
-      toast('تم حفظ التعديل');
-      overlay.remove();
-      loadProviders();
-    })
-    .catch((err) => { btn.disabled = false; toast(err.message, true); });
+  try {
+    await db.collection('providers').doc(id).update({ name, phone, plate });
+    await logActivity('تعديل بيانات', name);
+    toast('تم حفظ التعديل');
+    overlay.remove();
+    loadProviders();
+  } catch (err) { btn.disabled = false; toast(err.message, true); }
 }
 
-function deleteProvider(id) {
+async function deleteProvider(id) {
   const p = providersState.find((x) => x.id === id);
   if (!p) return;
   askConfirm(
     'حذف صاحب التوصيل',
     'هل تريد حذف "' + esc(p.name) + '" نهائياً؟<br>سيفقد حسابه وصلاحياته ولن يستطيع الدخول.',
-    () => {
-      api('/providers/' + id + '/delete', { method: 'POST', body: '{}' })
-        .then(() => {
-          toast('تم حذف صاحب التوصيل');
-          loadProviders();
-          loadDashboard();
-        })
-        .catch((err) => toast(err.message, true));
+    async () => {
+      try {
+        await db.collection('providers').doc(id).delete();
+        await logActivity('حذف صاحب توصيل', p.name);
+        toast('تم حذف صاحب التوصيل');
+        loadProviders();
+        loadDashboard();
+      } catch (err) { toast(err.message, true); }
     },
     { danger: true, confirm: 'حذف نهائي' }
   );
 }
 
-async function toggleProvider(id, action) {
+async function toggleProvider(id, field) {
   try {
-    await api('/providers/' + id + '/' + action, { method: 'POST', body: '{}' });
+    const doc = await db.collection('providers').doc(id).get();
+    const current = doc.data()[field];
+    await db.collection('providers').doc(id).update({ [field]: !current });
+    const p = providersState.find(x => x.id === id);
+    const label = field === 'is_connected' ? 'تفعيل/إيقاف الاتصال' : field === 'subscription_active' ? 'تفعيل/إيقاف الاشتراك' : 'حظر/رفع الحظر';
+    await logActivity(label, p ? p.name : '');
     toast('تم التحديث');
     loadProviders();
     loadDashboard();
-  } catch (err) {
-    toast(err.message, true);
-  }
+  } catch (err) { toast(err.message, true); }
 }
 
 /* ---------- Customers ---------- */
 
 async function loadCustomers() {
-  const rows = await api('/customers');
+  const snap = await db.collection('customers').get();
+  customersState = snap.docs.map(d => ({ id: d.id, ...d.data() }));
   const body = $('#customers-body');
-  if (!rows.length) {
+  if (!customersState.length) {
     body.innerHTML = '<tr class="empty-row"><td colspan="6">لا يوجد زبائن</td></tr>';
     return;
   }
-  body.innerHTML = rows
+  body.innerHTML = customersState
     .map((c) =>
       '<tr>' +
-      '<td>' + c.id + '</td>' +
+      '<td style="font-size:11px;max-width:80px;overflow:hidden;text-overflow:ellipsis" title="' + esc(c.id) + '">' + esc(c.id.substring(0, 8)) + '</td>' +
       '<td><strong>' + esc(c.name) + '</strong>' +
       (c.blocked ? ' <span class="badge rejected">محظور</span>' : (c.is_active === 0 ? ' <span class="badge inactive">موقوف</span>' : '')) +
       '</td>' +
       '<td>' + esc(c.phone) + '</td>' +
       '<td>' + fmtDateShort(c.joined_at) + '</td>' +
-      '<td>' + c.orders_count + '</td>' +
+      '<td>' + (c.orders_count || 0) + '</td>' +
       '<td><div class="row-actions">' +
-      '<button class="btn-sm blue" onclick="editCustomer(' + c.id + ')">تعديل</button>' +
-      '<button class="btn-sm ' + (c.is_active ? 'no' : 'ok') + '" onclick="toggleCustomer(' + c.id + ',\'toggle-active\')">' + (c.is_active ? 'تعطيل' : 'تفعيل') + '</button>' +
-      '<button class="btn-sm ' + (c.blocked ? 'ok' : 'no') + '" onclick="toggleCustomer(' + c.id + ',\'toggle-block\')">' + (c.blocked ? 'رفع الحظر' : 'حظر') + '</button>' +
-      '<button class="btn-sm no" onclick="deleteCustomer(' + c.id + ')">حذف</button>' +
+      '<button class="btn-sm blue" onclick="editCustomer(\'' + c.id + '\')">تعديل</button>' +
+      '<button class="btn-sm ' + (c.is_active ? 'no' : 'ok') + '" onclick="toggleCustomer(\'' + c.id + '\',\'is_active\')">' + (c.is_active ? 'تعطيل' : 'تفعيل') + '</button>' +
+      '<button class="btn-sm ' + (c.blocked ? 'ok' : 'no') + '" onclick="toggleCustomer(\'' + c.id + '\',\'blocked\')">' + (c.blocked ? 'رفع الحظر' : 'حظر') + '</button>' +
+      '<button class="btn-sm no" onclick="deleteCustomer(\'' + c.id + '\')">حذف</button>' +
       '</div></td>' +
       '</tr>'
     )
     .join('');
 }
 
-let customersState = [];
-
-async function reloadCustomersState() {
-  customersState = await api('/customers');
-}
-
 function editCustomer(id) {
-  reloadCustomersState().then(() => {
-    const c = customersState.find((x) => x.id === id);
-    if (!c) return;
-    const overlay = openModal({
-      title: 'تعديل بيانات الزبون: ' + esc(c.name),
-      body:
-        '<label class="modal-label">الاسم الكامل</label>' +
-        '<input id="ec-name" class="modal-input" type="text" value="' + esc(c.name) + '">' +
-        '<label class="modal-label">رقم الهاتف</label>' +
-        '<input id="ec-phone" class="modal-input" type="text" value="' + esc(c.phone) + '">',
-      foot:
-        '<button class="modal-btn ghost" data-close>إلغاء</button>' +
-        '<button class="modal-btn ok" data-submit>حفظ التعديل</button>',
-    });
-    const save = () => {
-      const name = overlay.querySelector('#ec-name').value.trim();
-      const phone = overlay.querySelector('#ec-phone').value.trim();
-      if (!name || !phone) return toast('الاسم والهاتف مطلوبان', true);
-      overlay.remove();
-      api('/customers/' + id + '/update', { method: 'POST', body: JSON.stringify({ name, phone }) })
-        .then(() => { toast('تم حفظ التعديل'); loadCustomers(); })
-        .catch((err) => toast(err.message, true));
-    };
-    overlay.querySelector('[data-submit]').addEventListener('click', save);
-    overlay.querySelector('[data-close]').addEventListener('click', () => overlay.remove());
+  const c = customersState.find((x) => x.id === id);
+  if (!c) return;
+  const overlay = openModal({
+    title: 'تعديل بيانات الزبون: ' + esc(c.name),
+    body:
+      '<label class="modal-label">الاسم الكامل</label>' +
+      '<input id="ec-name" class="modal-input" type="text" value="' + esc(c.name) + '">' +
+      '<label class="modal-label">رقم الهاتف</label>' +
+      '<input id="ec-phone" class="modal-input" type="text" value="' + esc(c.phone) + '">',
+    foot:
+      '<button class="modal-btn ghost" data-close>إلغاء</button>' +
+      '<button class="modal-btn ok" data-submit>حفظ التعديل</button>',
   });
-}
-
-function toggleCustomer(id, action) {
-  api('/customers/' + id + '/' + action, { method: 'POST', body: '{}' })
-    .then(() => {
-      toast('تم التحديث');
+  const save = async () => {
+    const name = overlay.querySelector('#ec-name').value.trim();
+    const phone = overlay.querySelector('#ec-phone').value.trim();
+    if (!name || !phone) return toast('الاسم والهاتف مطلوبان', true);
+    overlay.remove();
+    try {
+      await db.collection('customers').doc(id).update({ name, phone });
+      await logActivity('تعديل بيانات زبون', name);
+      toast('تم حفظ التعديل');
       loadCustomers();
-    })
-    .catch((err) => toast(err.message, true));
+    } catch (err) { toast(err.message, true); }
+  };
+  overlay.querySelector('[data-submit]').addEventListener('click', save);
+  overlay.querySelector('[data-close]').addEventListener('click', () => overlay.remove());
 }
 
-function deleteCustomer(id) {
-  reloadCustomersState().then(() => {
-    const c = customersState.find((x) => x.id === id);
-    if (!c) return;
-    askConfirm(
-      'حذف الزبون',
-      'هل تريد حذف "' + esc(c.name) + '" نهائياً؟<br>سيفقد حسابه ولن يستطيع الدخول.',
-      () => {
-        api('/customers/' + id + '/delete', { method: 'POST', body: '{}' })
-          .then(() => {
-            toast('تم حذف الزبون');
-            loadCustomers();
-            loadDashboard();
-          })
-          .catch((err) => toast(err.message, true));
-      },
-      { danger: true, confirm: 'حذف نهائي' }
-    );
-  });
+async function toggleCustomer(id, field) {
+  try {
+    const doc = await db.collection('customers').doc(id).get();
+    const current = doc.data()[field];
+    let newVal;
+    if (field === 'is_active') newVal = current ? 0 : 1;
+    else newVal = !current;
+    await db.collection('customers').doc(id).update({ [field]: newVal });
+    const c = customersState.find(x => x.id === id);
+    await logActivity('تغيير حالة زبون', c ? c.name : '');
+    toast('تم التحديث');
+    loadCustomers();
+  } catch (err) { toast(err.message, true); }
+}
+
+async function deleteCustomer(id) {
+  const c = customersState.find((x) => x.id === id);
+  if (!c) return;
+  askConfirm(
+    'حذف الزبون',
+    'هل تريد حذف "' + esc(c.name) + '" نهائياً؟<br>سيفقد حسابه ولن يستطيع الدخول.',
+    async () => {
+      try {
+        await db.collection('customers').doc(id).delete();
+        await logActivity('حذف زبون', c.name);
+        toast('تم حذف الزبون');
+        loadCustomers();
+        loadDashboard();
+      } catch (err) { toast(err.message, true); }
+    },
+    { danger: true, confirm: 'حذف نهائي' }
+  );
 }
 
 /* ---------- Activity ---------- */
 
 async function loadActivity() {
-  const rows = await api('/activity');
+  const snap = await db.collection('activity_log').orderBy('created_at', 'desc').limit(100).get();
+  const rows = snap.docs.map(d => ({ id: d.id, ...d.data() }));
   const el = $('#activity-full');
   el.innerHTML =
     rows
@@ -948,10 +1069,12 @@ async function loadActivity() {
 
 async function loadSubSettings() {
   try {
-    const s = await api('/settings');
-    $('#set-fee').value = s.subscription_fee;
-    $('#set-phone').value = s.payment_phone;
-    $('#set-note').value = s.payment_note || '';
+    const snap = await db.collection('settings').get();
+    const data = {};
+    snap.docs.forEach(d => { data[d.id] = d.data().value; });
+    $('#set-fee').value = data.subscription_fee || 500;
+    $('#set-phone').value = data.payment_phone || '';
+    $('#set-note').value = data.payment_note || '';
   } catch (err) {
     toast(err.message, true);
   }
@@ -961,10 +1084,12 @@ $('#subsettings-form').addEventListener('submit', async (e) => {
   e.preventDefault();
   const msg = $('#subsettings-msg');
   try {
-    const s = await api('/settings', {
-      method: 'POST',
-      body: JSON.stringify({ subscription_fee: Number($('#set-fee').value), payment_phone: $('#set-phone').value.trim(), payment_note: $('#set-note').value.trim() }),
-    });
+    const batch = db.batch();
+    batch.set(db.collection('settings').doc('subscription_fee'), { value: Number($('#set-fee').value) });
+    batch.set(db.collection('settings').doc('payment_phone'), { value: $('#set-phone').value.trim() });
+    batch.set(db.collection('settings').doc('payment_note'), { value: $('#set-note').value.trim() });
+    await batch.commit();
+    await logActivity('تحديث الإعدادات', 'قيمة الاشتراك ورقم ونص الدفع');
     msg.textContent = 'تم حفظ الإعدادات';
     msg.className = 'msg-text';
     msg.classList.remove('hidden');
@@ -980,10 +1105,14 @@ $('#password-form').addEventListener('submit', async (e) => {
   e.preventDefault();
   const msg = $('#pw-msg');
   try {
-    await api('/auth/password', {
-      method: 'POST',
-      body: JSON.stringify({ current: $('#pw-current').value, next: $('#pw-next').value }),
-    });
+    const current = $('#pw-current').value;
+    const next = $('#pw-next').value;
+    const snap = await db.collection('admins').where('username', '==', ADMIN.username).limit(1).get();
+    if (snap.empty || snap.docs[0].data().password !== current) {
+      throw new Error('كلمة المرور الحالية غير صحيحة');
+    }
+    await snap.docs[0].ref.update({ password: next });
+    await logActivity('تغيير كلمة المرور', ADMIN.full_name);
     msg.textContent = 'تم تغيير كلمة المرور بنجاح';
     msg.className = 'msg-text';
     msg.classList.remove('hidden');
@@ -1037,7 +1166,6 @@ $('#sound-toggle').addEventListener('click', () => {
 });
 
 $('#logout-btn').addEventListener('click', () => {
-  api('/auth/logout', { method: 'POST' }).catch(() => {});
   logout();
 });
 
@@ -1079,16 +1207,37 @@ function startClock() {
 /* ---------- Boot ---------- */
 
 async function boot() {
-  if (TOKEN) {
+  const saved = localStorage.getItem('hamada_admin');
+  if (saved) {
     try {
-      const res = await api('/auth/me');
-      ADMIN = res.admin;
-      enterApp();
-      return;
-    } catch {
-      logout();
-    }
+      ADMIN = JSON.parse(saved);
+      if (ADMIN && ADMIN.id) {
+        const doc = await db.collection('admins').doc(ADMIN.id).get();
+        if (doc.exists) {
+          ADMIN = { id: doc.id, ...doc.data() };
+          enterApp();
+          return;
+        }
+      }
+    } catch {}
+    localStorage.removeItem('hamada_admin');
   }
+
+  try {
+    const snap = await db.collection('admins').limit(1).get();
+    if (snap.empty) {
+      await db.collection('admins').doc('admin').set({
+        username: 'admin',
+        password: 'admin123',
+        full_name: 'مدير النظام',
+        role: 'owner',
+      });
+      await db.collection('settings').doc('subscription_fee').set({ value: 500 });
+      await db.collection('settings').doc('payment_phone').set({ value: '+222 33 123 45 67' });
+      await db.collection('settings').doc('payment_note').set({ value: 'قم بالإرسال من خلال بنكيلي أو مصرفي أو بيم بانك أو السداد إلى' });
+    }
+  } catch {}
+
   $('#login-screen').classList.remove('hidden');
 }
 
