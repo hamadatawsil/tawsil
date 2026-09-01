@@ -38,7 +38,10 @@ body {
   display: flex;
   align-items: center;
   justify-content: center;
-  background: linear-gradient(160deg, var(--navy-dark), var(--navy) 45%, #20376b 75%, #e85f00);
+  background:
+    radial-gradient(1200px 700px at 15% -10%, rgba(16, 43, 76, 0.85), transparent 55%),
+    radial-gradient(900px 600px at 90% 110%, rgba(16, 43, 76, 0.5), transparent 55%),
+    linear-gradient(165deg, #071a33 0%, #06203f 45%, #061838 72%, #041122 100%);
 }
 
 .login-card {
