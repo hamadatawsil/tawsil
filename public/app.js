@@ -321,7 +321,7 @@ async function handleLogin(e) {
     const data = doc.data();
     if (data.password !== password) throw new Error('اسم المستخدم أو كلمة المرور غير صحيحة');
     ADMIN = { id: doc.id, username: data.username, full_name: data.full_name, role: data.role };
-    localStorage.setItem('hamada_admin', JSON.stringify(ADMIN));
+    sessionStorage.setItem('hamada_admin', JSON.stringify(ADMIN));
     enterApp();
   } catch (err) {
     $('#login-error').textContent = err.message;
@@ -334,7 +334,7 @@ async function handleLogin(e) {
 function logout() {
   ADMIN = null;
   stopActivityPoller();
-  localStorage.removeItem('hamada_admin');
+  sessionStorage.removeItem('hamada_admin');
   $('#login-screen').classList.remove('hidden');
   $('#app-screen').classList.add('hidden');
   $('#login-password').value = '';
@@ -1353,7 +1353,7 @@ function startClock() {
 /* ---------- Boot ---------- */
 
 async function boot() {
-  const saved = localStorage.getItem('hamada_admin');
+  const saved = sessionStorage.getItem('hamada_admin');
   if (saved) {
     try {
       ADMIN = JSON.parse(saved);
@@ -1366,7 +1366,7 @@ async function boot() {
         }
       }
     } catch {}
-    localStorage.removeItem('hamada_admin');
+    sessionStorage.removeItem('hamada_admin');
   }
 
   try {
