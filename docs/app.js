@@ -773,6 +773,80 @@ function assignOrder(id) {
 
 const ORDER_STATUSES = ['new', 'accepted', 'en_route', 'completed', 'rejected'];
 
+function addOrder() {
+  const payOptions = Object.keys(PAY_LABELS)
+    .map((k) => '<option value="' + k + '">' + esc(PAY_LABELS[k]) + '</option>')
+    .join('') + '<option value="cash">نقداً</option>';
+  const overlay = openModal({
+    title: 'إرسال طلب توصيل',
+    body:
+      '<label class="modal-label">اسم الزبون</label>' +
+      '<input id="ao-name" class="modal-input" type="text" placeholder="مثال: أحمد محمد">' +
+      '<label class="modal-label">هاتف الزبون</label>' +
+      '<input id="ao-phone" class="modal-input" type="text" placeholder="مثال: +222 33 123 45 67">' +
+      '<label class="modal-label">من</label>' +
+      '<input id="ao-from" class="modal-input" type="text" placeholder="مثال: تفرغ زينة">' +
+      '<label class="modal-label">إلى</label>' +
+      '<input id="ao-to" class="modal-input" type="text" placeholder="مثال: تيارت">' +
+      '<label class="modal-label">الوصف (اختياري)</label>' +
+      '<input id="ao-desc" class="modal-input" type="text" placeholder="مثال: كرتونة طعام">' +
+      '<label class="modal-label">السعر (أوقية، بين 100 و 250)</label>' +
+      '<input id="ao-total" class="modal-input" type="number" min="100" max="250" step="1" value="150">' +
+      '<label class="modal-label">وسيلة الدفع</label>' +
+      '<select id="ao-pay" class="modal-input">' + payOptions + '</select>',
+    foot:
+      '<button class="modal-btn ghost" data-close>إلغاء</button>' +
+      '<button class="modal-btn ok" data-submit>إرسال الطلب</button>',
+  });
+  const save = async () => {
+    const name = overlay.querySelector('#ao-name').value.trim();
+    const phone = overlay.querySelector('#ao-phone').value.trim();
+    const fromArea = overlay.querySelector('#ao-from').value.trim();
+    const toArea = overlay.querySelector('#ao-to').value.trim();
+    const total = Number(overlay.querySelector('#ao-total').value);
+    if (!name) { toast('أدخل اسم الزبون', true); return; }
+    if (!phone) { toast('أدخل هاتف الزبون', true); return; }
+    if (!fromArea || !toArea) { toast('أدخل نقطة الانطلاق والوصول', true); return; }
+    if (!Number.isFinite(total) || total < 100 || total > 250) {
+      toast('سعر الرحلة يجب أن يكون بين 100 و 250 أوقية', true);
+      return;
+    }
+    const typeIndex = total <= 100 ? 0 : (total <= 150 ? 1 : 2);
+    const paymentMethod = overlay.querySelector('#ao-pay').value;
+    const description = overlay.querySelector('#ao-desc').value.trim();
+    overlay.remove();
+    try {
+      const doc = await db.collection('orders').add({
+        customer_name: name,
+        customer_phone: phone,
+        service: 'delivery',
+        from_area: fromArea,
+        to_area: toArea,
+        km: 0,
+        base: total,
+        rate: 0,
+        total: total,
+        status: 'new',
+        payment_method: paymentMethod,
+        description: description,
+        type_index: typeIndex,
+        provider_id: null,
+        provider_name: '',
+        from_lat: null,
+        from_lng: null,
+        created_at: firebase.firestore.FieldValue.serverTimestamp(),
+        completed_at: null,
+      });
+      await logActivity('إرسال طلب توصيل', name + ' — ' + fromArea + ' ← ' + toArea);
+      toast('تم إرسال طلب التوصيل');
+      loadOrders();
+      loadDashboard();
+    } catch (err) { toast(err.message, true); }
+  };
+  overlay.querySelector('[data-submit]').addEventListener('click', save);
+  overlay.querySelector('[data-close]').addEventListener('click', () => overlay.remove());
+}
+
 function editOrder(id) {
   const o = ordersState.find((x) => x.id === id);
   if (!o) return;

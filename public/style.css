@@ -176,6 +176,8 @@ body {
   font-family: inherit;
 }
 .btn-ghost:hover { background: #d8ebdf; }
+.btn-ghost.ok { background: var(--primary); color: #fff; border-color: var(--primary); }
+.btn-ghost.ok:hover { background: #0f7a52; }
 .btn-ghost.danger { background: var(--danger-light); color: var(--danger); border-color: #f3c6c6; }
 .btn-ghost.danger:hover { background: #f6d2d2; }
 .btn-ghost.busy { color: transparent; pointer-events: none; }
