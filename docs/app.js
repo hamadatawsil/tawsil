@@ -137,7 +137,7 @@ function beep(freq, delay, dur, vol, type) {
 
 function toneKind(action) {
   const a = action || '';
-  if (a.includes('طلب توصيل جديد')) return 'order';
+  if (a.includes('طلب توصيل جديد') || a.includes('إرسال طلب توصيل')) return 'order';
   if (a.includes('طلب اشتراك جديد') || a.includes('إعادة رفع أوراق')) return 'subs';
   if (a.includes('حظر') || a.includes('حذف') || a.includes('رفض')) return 'danger';
   if (a.includes('قبول')) return 'accept';
@@ -185,17 +185,93 @@ async function pollActivity() {
       .get();
     const fresh = snap.docs.map(d => ({ id: d.id, ...d.data() }))
       .filter(a => a.admin_name !== ADMIN.full_name);
-    if (!fresh.length) return;
-    lastActivityTs = fresh[0].created_at ? fresh[0].created_at.toDate() : new Date();
-    fresh.forEach((a) => playTone(toneKind(a.action)));
-    const first = fresh[0];
-    toast(fresh.length > 1 ? fresh.length + ' عمليات جديدة — ' + first.action : first.action + (first.target ? ': ' + first.target : ''));
+    if (fresh.length) {
+      lastActivityTs = fresh[0].created_at ? fresh[0].created_at.toDate() : new Date();
+      fresh.forEach((a) => playTone(toneKind(a.action)));
+      const first = fresh[0];
+      toast(fresh.length > 1 ? fresh.length + ' عمليات جديدة — ' + first.action : first.action + (first.target ? ': ' + first.target : ''));
+      showAlertPopup(fresh);
+    }
+    refreshNavBadges();
     const badge = $('#event-badge');
-    if (badge) { badge.textContent = fresh.length; badge.classList.remove('hidden'); }
+    if (badge && fresh.length) {
+      badge.textContent = fresh.length;
+      badge.classList.remove('hidden');
+      clearTimeout(badge._t);
+      badge._t = setTimeout(() => badge.classList.add('hidden'), 8000);
+    }
     if (document.querySelector('.doc-lightbox')) return;
     const active = document.querySelector('.nav-item.active');
     if (active && active.dataset.view !== 'settings') autoRefreshView(active.dataset.view);
   } catch {}
+}
+
+function showAlertPopup(fresh) {
+  if (!fresh || !fresh.length) return;
+  const important = fresh.find((a) =>
+    a.action.includes('طلب توصيل جديد') ||
+    a.action.includes('طلب اشتراك جديد') ||
+    a.action.includes('إعادة رفع أوراق') ||
+    a.action.includes('حظر') ||
+    a.action.includes('حذف')
+  );
+  if (!important) return;
+  const alert = document.createElement('div');
+  alert.className = 'alert-popup';
+  const isDanger = important.action.includes('حظر') || important.action.includes('حذف');
+  alert.innerHTML =
+    '<div class="alert-popup-head"><span class="alert-dot"></span>تنبيه جديد</div>' +
+    '<div class="alert-message">' + esc(important.action) + (important.target ? ': ' + esc(important.target) : '') + '</div>' +
+    '<div class="alert-popup-foot"><button class="btn-sm ' + (isDanger ? 'no' : 'ok') + '" data-alert-view>عرض</button>' +
+    '<button class="btn-sm" data-alert-close>إغلاق</button></div>';
+  document.body.appendChild(alert);
+  const clear = () => alert.classList.add('hide');
+  alert.querySelector('[data-alert-close]').addEventListener('click', clear);
+  alert.querySelector('[data-alert-view]').addEventListener('click', () => {
+    const view = important.action.includes('طلب اشتراك') || important.action.includes('إعادة رفع')
+      ? 'requests'
+      : important.action.includes('طلب توصيل') ? 'orders' : 'activity';
+    switchView(view);
+    loadView(view);
+    clear();
+  });
+  setTimeout(clear, 9000);
+}
+
+async function refreshNavBadges() {
+  try {
+    const pendingRef = db.collection('subscription_requests').where('status', '==', 'pending');
+    const resubRef = db.collection('subscription_requests').where('status', '==', 'needs_resubmission');
+    const newOrdersRef = db.collection('orders').where('status', '==', 'new');
+    const [pending, resub, newOrders] = await Promise.all([
+      pendingRef.count().get(),
+      resubRef.count().get(),
+      newOrdersRef.count().get(),
+    ]);
+    setNavBadge('requests', pending.data().count + resub.data().count);
+    setNavBadge('orders', newOrders.data().count);
+    setSegCount('requests-pending', pending.data().count);
+    setSegCount('orders-new', newOrders.data().count);
+  } catch {}
+}
+
+function setSegCount(key, count) {
+  const el = document.querySelector('[data-count="' + key + '"]');
+  if (!el) return;
+  if (!count) { el.classList.add('hidden'); return; }
+  el.textContent = count;
+  el.classList.remove('hidden');
+}
+
+function setNavBadge(view, count) {
+  const el = document.querySelector('[data-badge="' + view + '"]');
+  if (!el) return;
+  if (!count) { el.classList.add('hidden'); return; }
+  el.textContent = count;
+  el.classList.remove('hidden');
+  el.classList.remove('pop');
+  void el.offsetWidth;
+  el.classList.add('pop');
 }
 
 function esc(s) {
@@ -273,6 +349,7 @@ function enterApp() {
   loadView('dashboard');
   startClock();
   startActivityPoller();
+  refreshNavBadges();
 }
 
 /* ---------- Navigation ---------- */
@@ -291,6 +368,8 @@ function switchView(name) {
   document.querySelectorAll('.nav-item').forEach((b) => b.classList.toggle('active', b.dataset.view === name));
   document.querySelectorAll('.view').forEach((v) => v.classList.toggle('active', v.id === 'view-' + name));
   $('#view-title').textContent = TITLES[name] || '';
+  const b = document.querySelector('.nav-item.active');
+  if (b) setNavBadge(b.dataset.view, 0);
 }
 
 async function loadView(name) {
@@ -774,9 +853,6 @@ function assignOrder(id) {
 const ORDER_STATUSES = ['new', 'accepted', 'en_route', 'completed', 'rejected'];
 
 function addOrder() {
-  const payOptions = Object.keys(PAY_LABELS)
-    .map((k) => '<option value="' + k + '">' + esc(PAY_LABELS[k]) + '</option>')
-    .join('') + '<option value="cash">نقداً</option>';
   const overlay = openModal({
     title: 'إرسال طلب توصيل',
     body:
@@ -791,9 +867,7 @@ function addOrder() {
       '<label class="modal-label">الوصف (اختياري)</label>' +
       '<input id="ao-desc" class="modal-input" type="text" placeholder="مثال: كرتونة طعام">' +
       '<label class="modal-label">السعر (أوقية، بين 100 و 250)</label>' +
-      '<input id="ao-total" class="modal-input" type="number" min="100" max="250" step="1" value="150">' +
-      '<label class="modal-label">وسيلة الدفع</label>' +
-      '<select id="ao-pay" class="modal-input">' + payOptions + '</select>',
+      '<input id="ao-total" class="modal-input" type="number" min="100" max="250" step="1" value="150">',
     foot:
       '<button class="modal-btn ghost" data-close>إلغاء</button>' +
       '<button class="modal-btn ok" data-submit>إرسال الطلب</button>',
@@ -812,7 +886,6 @@ function addOrder() {
       return;
     }
     const typeIndex = total <= 100 ? 0 : (total <= 150 ? 1 : 2);
-    const paymentMethod = overlay.querySelector('#ao-pay').value;
     const description = overlay.querySelector('#ao-desc').value.trim();
     overlay.remove();
     try {
@@ -827,7 +900,7 @@ function addOrder() {
         rate: 0,
         total: total,
         status: 'new',
-        payment_method: paymentMethod,
+        payment_method: 'cash',
         description: description,
         type_index: typeIndex,
         provider_id: null,

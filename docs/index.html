@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>لوحة تحكم حماده للتوصيل</title>
-  <link rel="stylesheet" href="style.css?v=20260826" />
+  <link rel="stylesheet" href="style.css?v=20260901-2" />
   <script src="https://www.gstatic.com/firebasejs/10.14.1/firebase-app-compat.js"></script>
   <script src="https://www.gstatic.com/firebasejs/10.14.1/firebase-firestore-compat.js"></script>
   <script>
@@ -42,8 +42,8 @@
       </div>
       <nav class="side-nav">
         <button class="nav-item active" data-view="dashboard">لوحة الإحصائيات</button>
-        <button class="nav-item" data-view="requests">طلبات الاشتراك</button>
-        <button class="nav-item" data-view="orders">الطلبات</button>
+        <button class="nav-item" data-view="requests">طلبات الاشتراك<span class="nav-badge hidden" data-badge="requests">0</span></button>
+        <button class="nav-item" data-view="orders">الطلبات<span class="nav-badge hidden" data-badge="orders">0</span></button>
         <button class="nav-item" data-view="providers">أصحاب التوصيل</button>
         <button class="nav-item" data-view="customers">الزبائن</button>
         <button class="nav-item" data-view="activity">سجل النشاط</button>
@@ -90,7 +90,7 @@
         <div class="filter-bar">
           <div class="seg" id="requests-seg">
             <button class="seg-btn active" data-status="">الكل</button>
-            <button class="seg-btn" data-status="pending">قيد المراجعة</button>
+            <button class="seg-btn" data-status="pending">قيد المراجعة<span class="seg-count hidden" data-count="requests-pending">0</span></button>
             <button class="seg-btn" data-status="needs_resubmission">مطلوب استكمال</button>
             <button class="seg-btn" data-status="approved">مقبول</button>
             <button class="seg-btn" data-status="rejected">مرفوض</button>
@@ -116,7 +116,7 @@
           <input id="orders-search" class="search-input" type="text" placeholder="بحث بالاسم أو الحي..." />
           <div class="seg" id="orders-seg">
             <button class="seg-btn active" data-status="">الكل</button>
-            <button class="seg-btn" data-status="new">جديد</button>
+            <button class="seg-btn" data-status="new">جديد<span class="seg-count hidden" data-count="orders-new">0</span></button>
             <button class="seg-btn" data-status="accepted">مقبول</button>
             <button class="seg-btn" data-status="en_route">قيد التوصيل</button>
             <button class="seg-btn" data-status="completed">مكتمل</button>
@@ -212,6 +212,6 @@
 
   <div id="modal-root"></div>
   <div id="toast" class="toast hidden"></div>
-  <script src="app.js?v=20260901"></script>
+  <script src="app.js?v=20260901-2"></script>
 </body>
 </html>
