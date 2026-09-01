@@ -103,10 +103,26 @@ body {
   flex-shrink: 0;
 }
 
-.side-brand { padding: 20px 16px; border-bottom: 1px solid rgba(255,255,255,0.1); }
-.side-brand img { width: 42px; height: 42px; border-radius: 10px; display: block; margin-bottom: 6px; }
-.side-brand strong { display: block; font-size: 17px; }
-.side-brand span { font-size: 12px; color: #ffc897; }
+.side-brand {
+  padding: 26px 16px 20px;
+  border-bottom: 1px solid rgba(255,255,255,0.1);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  text-align: center;
+}
+.side-brand img {
+  width: 96px;
+  height: 96px;
+  border-radius: 24px;
+  display: block;
+  margin-bottom: 14px;
+  object-fit: contain;
+  background: rgba(255,255,255,0.08);
+  box-shadow: 0 10px 30px rgba(0,0,0,0.35), 0 0 0 4px rgba(255,120,0,0.35), 0 0 24px rgba(255,120,0,0.25);
+}
+.side-brand strong { display: block; font-size: 18px; letter-spacing: 0.2px; }
+.side-brand span { font-size: 12px; color: #ffc897; margin-top: 3px; opacity: 0.9; }
 
 .side-nav { flex: 1; padding: 12px 0; }
 
@@ -125,13 +141,15 @@ body {
   cursor: pointer;
   font-family: inherit;
   border-right: 3px solid transparent;
+  transition: background 0.15s, color 0.15s;
 }
 
 .nav-item:hover { background: rgba(255,255,255,0.08); color: #fff; }
 .nav-item.active {
-  background: linear-gradient(90deg, rgba(255,120,0,0.25), rgba(255,120,0,0.05));
+  background: linear-gradient(90deg, rgba(255,120,0,0.28), rgba(255,120,0,0.06));
   color: #fff;
   border-right-color: var(--primary);
+  box-shadow: inset 0 0 0 1px rgba(255,120,0,0.15);
 }
 
 .nav-badge {
@@ -705,8 +723,8 @@ tbody tr:hover { background: #fafcfa; }
     align-items: center;
     padding: 8px 10px;
   }
-  .side-brand { padding: 6px 8px; border-bottom: none; }
-  .side-brand img { width: 34px; height: 34px; }
+  .side-brand { padding: 4px 8px; border-bottom: none; flex-direction: row; justify-content: flex-start; gap: 10px; text-align: right; }
+  .side-brand img { width: 44px; height: 44px; border-radius: 12px; margin-bottom: 0; }
   .side-brand strong { font-size: 15px; }
   .side-brand span { display: none; }
   .side-nav { display: flex; flex-wrap: wrap; gap: 4px; padding: 6px 0; }
