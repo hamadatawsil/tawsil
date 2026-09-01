@@ -480,10 +480,10 @@ let requestsFilter = '';
 let requestsState = [];
 
 async function loadRequests() {
-  let ref = db.collection('subscription_requests');
-  if (requestsFilter) ref = ref.where('status', '==', requestsFilter);
-  const snap = await ref.orderBy('created_at', 'desc').get();
-  requestsState = snap.docs.map(d => ({ id: d.id, ...d.data() }));
+  const snap = await db.collection('subscription_requests').orderBy('created_at', 'desc').get();
+  const rows = snap.docs.map(d => ({ id: d.id, ...d.data() }));
+  if (requestsFilter) requestsState = rows.filter(r => r.status === requestsFilter);
+  else requestsState = rows;
   const body = $('#requests-body');
   if (!requestsState.length) {
     body.innerHTML = '<tr class="empty-row"><td colspan="8">لا توجد طلبات</td></tr>';
@@ -759,10 +759,9 @@ let ordersFilter = '';
 
 async function loadOrders() {
   const q = ($('#orders-search') ? $('#orders-search').value : '').trim();
-  let ref = db.collection('orders');
-  if (ordersFilter) ref = ref.where('status', '==', ordersFilter);
-  const snap = await ref.orderBy('created_at', 'desc').limit(500).get();
+  const snap = await db.collection('orders').orderBy('created_at', 'desc').get();
   let rows = snap.docs.map(d => ({ id: d.id, ...d.data() }));
+  if (ordersFilter) rows = rows.filter(o => o.status === ordersFilter);
   if (q) {
     const ql = q.toLowerCase();
     rows = rows.filter(o => (o.customer_name || '').toLowerCase().includes(ql) || (o.from_area || '').toLowerCase().includes(ql) || (o.to_area || '').toLowerCase().includes(ql));
