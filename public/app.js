@@ -360,6 +360,7 @@ const TITLES = {
   orders: 'الطلبات',
   providers: 'أصحاب التوصيل',
   customers: 'الزبائن',
+  areas: 'المناطق',
   activity: 'سجل النشاط',
   settings: 'الإعدادات',
 };
@@ -379,6 +380,7 @@ async function loadView(name) {
     if (name === 'orders') await loadOrders();
     if (name === 'providers') await loadProviders();
     if (name === 'customers') await loadCustomers();
+    if (name === 'areas') await loadAreas();
     if (name === 'activity') await loadActivity();
     if (name === 'settings') await loadSubSettings();
   } catch (err) {
@@ -1129,6 +1131,137 @@ async function loadCustomers() {
       '</tr>'
     )
     .join('');
+}
+
+/* ---------- Areas (المناطق) ---------- */
+
+let areasState = [];
+
+async function loadAreas() {
+  const snap = await db.collection('neighborhoods').get();
+  areasState = snap.docs.map(d => ({ id: d.id, ...d.data() }));
+  areasState.sort((a, b) => (a.ar || '').localeCompare(b.ar || '', 'ar'));
+  const body = $('#areas-body');
+  if (!areasState.length) {
+    body.innerHTML = '<tr class="empty-row"><td colspan="6">لا توجد مناطق. اضغط «إضافة منطقة»</td></tr>';
+    return;
+  }
+  body.innerHTML = areasState
+    .map((a, i) =>
+      '<tr>' +
+      '<td>' + (i + 1) + '</td>' +
+      '<td><strong>' + esc(a.ar) + '</strong></td>' +
+      '<td>' + esc(a.fr || '') + '</td>' +
+      '<td>' + esc(a.en || '') + '</td>' +
+      '<td>' + (a.hasProviders ? '<span class="badge online">متاح</span>' : '<span class="badge offline">غير متوفر</span>') + '</td>' +
+      '<td><div class="row-actions">' +
+      '<button class="btn-sm blue" onclick="editArea(\'' + a.id + '\')">تعديل</button>' +
+      '<button class="btn-sm no" onclick="deleteArea(\'' + a.id + '\')">حذف</button>' +
+      '</div></td>' +
+      '</tr>'
+    )
+    .join('');
+}
+
+function areaModal({ title, data, submitLabel, onSubmit }) {
+  const overlay = openModal({
+    title,
+    body:
+      '<label class="modal-label">الاسم بالعربية *</label>' +
+      '<input id="a-ar" class="modal-input" type="text" value="' + esc(data.ar || '') + '" placeholder="مثال: تيارت">' +
+      '<label class="modal-label">الاسم بالفرنسية</label>' +
+      '<input id="a-fr" class="modal-input" type="text" value="' + esc(data.fr || '') + '">' +
+      '<label class="modal-label">الاسم بالإنجليزية</label>' +
+      '<input id="a-en" class="modal-input" type="text" value="' + esc(data.en || '') + '">' +
+      '<label class="modal-label">متوفر لديه أصحاب توصيل؟</label>' +
+      '<div class="seg" style="margin-top:6px">' +
+      '<button type="button" class="seg-btn' + (data.hasProviders ? ' active' : '') + '" id="a-hp-y">متاح</button>' +
+      '<button type="button" class="seg-btn' + (!data.hasProviders ? ' active' : '') + '" id="a-hp-n">غير متوفر</button>' +
+      '</div>',
+    foot:
+      '<button class="modal-btn ghost" data-close>إلغاء</button>' +
+      '<button class="modal-btn ok" data-submit>' + esc(submitLabel) + '</button>',
+  });
+  let hasProviders = !!data.hasProviders;
+  const y = overlay.querySelector('#a-hp-y');
+  const n = overlay.querySelector('#a-hp-n');
+  y.addEventListener('click', () => { y.classList.add('active'); n.classList.remove('active'); hasProviders = true; });
+  n.addEventListener('click', () => { n.classList.add('active'); y.classList.remove('active'); hasProviders = false; });
+  const save = async () => {
+    const ar = overlay.querySelector('#a-ar').value.trim();
+    const fr = overlay.querySelector('#a-fr').value.trim();
+    const en = overlay.querySelector('#a-en').value.trim();
+    if (!ar) { toast('الاسم بالعربية مطلوب', true); return; }
+    overlay.remove();
+    await onSubmit({ ar, fr: fr || ar, en: en || ar, hasProviders });
+  };
+  overlay.querySelector('[data-submit]').addEventListener('click', save);
+  overlay.querySelector('[data-close]').addEventListener('click', () => overlay.remove());
+}
+
+function addArea() {
+  areaModal({
+    title: 'إضافة منطقة جديدة',
+    data: { ar: '', fr: '', en: '', hasProviders: true },
+    submitLabel: 'حفظ المنطقة',
+    onSubmit: async (v) => {
+      try {
+        const id = 'ar_' + v.ar.replace(/\s+/g, '_').toLowerCase();
+        await db.collection('neighborhoods').doc(id).set({
+          id,
+          ar: v.ar,
+          fr: v.fr,
+          en: v.en,
+          hasProviders: v.hasProviders,
+          created_at: firebase.firestore.FieldValue.serverTimestamp(),
+        });
+        await logActivity('إضافة منطقة', v.ar);
+        toast('تم إضافة المنطقة: ' + v.ar);
+        loadAreas();
+      } catch (err) { toast(err.message, true); }
+    },
+  });
+}
+
+function editArea(id) {
+  const a = areasState.find((x) => x.id === id);
+  if (!a) return;
+  areaModal({
+    title: 'تعديل المنطقة: ' + esc(a.ar),
+    data: { ar: a.ar, fr: a.fr, en: a.en, hasProviders: a.hasProviders },
+    submitLabel: 'حفظ التعديل',
+    onSubmit: async (v) => {
+      try {
+        await db.collection('neighborhoods').doc(id).update({ ar: v.ar, fr: v.fr, en: v.en, hasProviders: v.hasProviders });
+        await logActivity('تعديل منطقة', v.ar);
+        toast('تم حفظ التعديل');
+        loadAreas();
+      } catch (err) { toast(err.message, true); }
+    },
+  });
+}
+
+function deleteArea(id) {
+  const a = areasState.find((x) => x.id === id);
+  if (!a) return;
+  const overlay = openModal({
+    title: 'حذف المنطقة',
+    body: '<p>هل تريد حذف المنطقة <strong>' + esc(a.ar) + '</strong>؟ لا يمكن التراجع.</p>',
+    foot:
+      '<button class="modal-btn ghost" data-close>إلغاء</button>' +
+      '<button class="modal-btn no" data-submit>حذف</button>',
+  });
+  const del = async () => {
+    overlay.remove();
+    try {
+      await db.collection('neighborhoods').doc(id).delete();
+      await logActivity('حذف منطقة', a.ar);
+      toast('تم حذف المنطقة');
+      loadAreas();
+    } catch (err) { toast(err.message, true); }
+  };
+  overlay.querySelector('[data-submit]').addEventListener('click', del);
+  overlay.querySelector('[data-close]').addEventListener('click', () => overlay.remove());
 }
 
 function editCustomer(id) {
