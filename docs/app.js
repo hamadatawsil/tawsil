@@ -6,6 +6,29 @@ let ordersState = [];
 let providersState = [];
 let customersState = [];
 
+/* ---------- إعدادات المكالمات (Agora) ---------- */
+const AGORA_APP_ID = '9f539745893d4bbb86741430ab9137db';
+const AGORA_APP_CERT = '4f051a05587648238e6d208198db110f';
+const CALL_ADMIN_ID = 'admin';
+const CALL_ADMIN_UID = 2;
+const RING_TIMEOUT_MS = 60000;
+
+const CALL_STATUS_LABELS = {
+  ringing: 'يرن',
+  ongoing: 'جارية',
+  ended: 'منتهية',
+  declined: 'مرفوضة',
+  missed: 'فائتة',
+};
+
+let callsState = [];
+let callsSub = null;
+let ringToneTimer = null;
+let activeRingCallId = null;
+let callEngine = null;
+let callInProgress = false;
+const handledRinging = new Set();
+
 const DOC_LABELS = {
   personal: 'صورة شخصية',
   id: 'بطاقة التعريف',
@@ -307,6 +330,362 @@ async function logActivity(action, target) {
   } catch {}
 }
 
+/* ---------- المكالمات (Agora) ---------- */
+
+function callRoleLabel(role) {
+  const map = { guest: 'زائر', customer: 'زبون', driver: 'صاحب توصيل', owner: 'صاحب توصيل', admin: 'الإدارة' };
+  return map[role] || role || '—';
+}
+
+async function agoraHmacSha256(keyBytes, dataBytes) {
+  const key = await crypto.subtle.importKey(
+    'raw', keyBytes, { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']
+  );
+  const sig = await crypto.subtle.sign('HMAC', key, dataBytes);
+  return new Uint8Array(sig);
+}
+
+function agWriteUint16(bytes, off, v) {
+  bytes[off] = v & 0xff;
+  bytes[off + 1] = (v >> 8) & 0xff;
+}
+
+function agWriteUint32(bytes, off, v) {
+  bytes[off] = v & 0xff;
+  bytes[off + 1] = (v >>> 8) & 0xff;
+  bytes[off + 2] = (v >>> 16) & 0xff;
+  bytes[off + 3] = (v >>> 24) & 0xff;
+}
+
+function agCrc32(bytes) {
+  let crc = 0xFFFFFFFF;
+  for (let i = 0; i < bytes.length; i++) {
+    crc ^= bytes[i];
+    for (let j = 0; j < 8; j++) crc = (crc >>> 1) ^ (0xEDB88320 & -(crc & 1));
+  }
+  return (crc ^ 0xFFFFFFFF) >>> 0;
+}
+
+function agBase64(bytes) {
+  const CH = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
+  let out = '';
+  for (let i = 0; i < bytes.length; i += 3) {
+    const b0 = bytes[i];
+    const b1 = i + 1 < bytes.length ? bytes[i + 1] : 0;
+    const b2 = i + 2 < bytes.length ? bytes[i + 2] : 0;
+    out += CH[b0 >> 2];
+    out += CH[((b0 & 3) << 4) | (b1 >> 4)];
+    out += i + 1 < bytes.length ? CH[((b1 & 15) << 2) | (b2 >> 6)] : '=';
+    out += i + 2 < bytes.length ? CH[b2 & 63] : '=';
+  }
+  return out;
+}
+
+function agPackMessage(salt, ts, expireTs) {
+  const out = new Uint8Array(34);
+  let off = 0;
+  agWriteUint32(out, off, salt); off += 4;
+  agWriteUint32(out, off, ts); off += 4;
+  agWriteUint16(out, off, 4); off += 2;
+  [1, 2, 3, 4].forEach((k) => {
+    agWriteUint16(out, off, k); off += 2;
+    agWriteUint32(out, off, expireTs); off += 4;
+  });
+  return out;
+}
+
+function agConcat(parts) {
+  const len = parts.reduce((s, b) => s + b.length, 0);
+  const out = new Uint8Array(len);
+  let off = 0;
+  for (const b of parts) { out.set(b, off); off += b.length; }
+  return out;
+}
+
+async function agoraToken(appId, appCert, channel, uid, expireTs) {
+  const te = new TextEncoder();
+  const uidStr = uid === 0 ? '' : String(uid);
+  const salt = (Math.floor(Math.random() * 0x7fffffff) + (Math.floor(Math.random() * 2) << 31)) >>> 0;
+  const ts = Math.floor(Date.now() / 1000) + 24 * 3600;
+  const m = agPackMessage(salt, ts, expireTs);
+
+  const signData = agConcat([te.encode(appId), te.encode(channel), te.encode(uidStr), m]);
+  const sig = await agoraHmacSha256(te.encode(appCert), signData);
+  const crcChannel = agCrc32(te.encode(channel));
+  const crcUid = agCrc32(te.encode(uidStr));
+
+  const content = new Uint8Array(2 + sig.length + 4 + 4 + 2 + m.length);
+  let off = 0;
+  agWriteUint16(content, off, sig.length); off += 2;
+  content.set(sig, off); off += sig.length;
+  agWriteUint32(content, off, crcChannel); off += 4;
+  agWriteUint32(content, off, crcUid); off += 4;
+  agWriteUint16(content, off, m.length); off += 2;
+  content.set(m, off);
+
+  return '006' + appId + agBase64(content);
+}
+
+function startRingTone() {
+  stopRingTone();
+  ensureAudio();
+  ringToneTimer = setInterval(() => {
+    beep(880, 0, 0.34, 0.24);
+    beep(880, 0.4, 0.34, 0.24);
+  }, 1350);
+}
+
+function stopRingTone() {
+  if (ringToneTimer) { clearInterval(ringToneTimer); ringToneTimer = null; }
+}
+
+async function endCallDoc(callId, status, reason) {
+  const patch = { status, endedAt: firebase.firestore.FieldValue.serverTimestamp() };
+  if (reason) patch.endReason = reason;
+  try { await db.collection('calls').doc(callId).update(patch); } catch {}
+}
+
+function showIncomingCall(data) {
+  if (callInProgress || activeRingCallId) return;
+  activeRingCallId = data.id;
+  const name = data.callerName || data.callerId || 'مستعمل';
+  const overlay = openModal({
+    title: 'مكالمة واردة إلى الإدارة',
+    body:
+      '<div class="incoming-call-avatar">☎</div>' +
+      '<div class="incoming-call-name">' + esc(name) + '</div>' +
+      '<div class="incoming-call-role">' + esc(callRoleLabel(data.callerRole)) + '</div>' +
+      '<div class="call-status-ring">يرن الآن...</div>',
+    foot:
+      '<button class="modal-btn no" data-decline>رفض</button>' +
+      '<button class="modal-btn ok" data-answer>قبول</button>',
+  });
+  const titleClose = overlay.querySelector('.doc-lightbox-head .btn-sm');
+  if (titleClose) titleClose.style.display = 'none';
+  startRingTone();
+
+  const close = () => {
+    overlay.remove();
+    stopRingTone();
+    activeRingCallId = null;
+  };
+
+  overlay.querySelector('[data-answer]').addEventListener('click', async () => {
+    clearTimeout(close._t);
+    close();
+    await answerIncomingCall(data);
+  });
+  overlay.querySelector('[data-decline]').addEventListener('click', async () => {
+    clearTimeout(close._t);
+    await endCallDoc(data.id, 'declined', 'admin_declined');
+    handledRinging.add(data.id);
+    close();
+  });
+  close._t = setTimeout(async () => {
+    await endCallDoc(data.id, 'missed', 'callee_no_answer');
+    handledRinging.add(data.id);
+    close();
+  }, RING_TIMEOUT_MS);
+}
+
+let activeCallTicker = null;
+function clearActiveCallTicker() {
+  if (activeCallTicker) { clearInterval(activeCallTicker); activeCallTicker = null; }
+}
+function closeActiveCallOverlay() {
+  const overlay = document.querySelector('.call-active-overlay');
+  if (overlay && overlay.parentNode) overlay.parentNode.removeChild(overlay);
+}
+
+function showActiveCall(data) {
+  const overlay = openModal({
+    title: 'مكالمة جارية',
+    body:
+      '<div class="incoming-call-avatar">☎</div>' +
+      '<div class="incoming-call-name">' + esc(data.callerName || data.callerId || '') + '</div>' +
+      '<div class="call-status-ring" id="call-timer">00:00</div>',
+    foot:
+      '<button class="modal-btn ghost" data-mute>كتم</button>' +
+      '<button class="modal-btn no" data-hangup>إنهاء</button>',
+  });
+  overlay.classList.add('call-active-overlay');
+  const titleClose = overlay.querySelector('.doc-lightbox-head .btn-sm');
+  if (titleClose) titleClose.style.display = 'none';
+
+  const t0 = Date.now();
+  const tick = setInterval(() => {
+    const el = overlay.querySelector('#call-timer');
+    if (!el) return;
+    const s = Math.floor((Date.now() - t0) / 1000);
+    el.textContent = String(Math.floor(s / 60)).padStart(2, '0') + ':' + String(s % 60).padStart(2, '0');
+  }, 1000);
+  clearActiveCallTicker();
+  activeCallTicker = tick;
+
+  let muted = false;
+  const muteBtn = overlay.querySelector('[data-mute]');
+  muteBtn.addEventListener('click', async () => {
+    muted = !muted;
+    muteBtn.textContent = muted ? 'التحدث' : 'كتم';
+    try { if (callMicTrack) await callMicTrack.setEnabled(!muted); } catch {}
+  });
+  overlay.querySelector('[data-hangup]').addEventListener('click', async () => {
+    await hangupCall(data.id);
+  });
+}
+
+async function answerIncomingCall(data) {
+  const callId = data.id;
+  try {
+    callInProgress = true;
+    const channel = data.channelName || ('call_' + callId);
+    const token = await agoraToken(
+      AGORA_APP_ID, AGORA_APP_CERT, channel, CALL_ADMIN_UID,
+      Math.floor(Date.now() / 1000) + 86400
+    );
+    const client = AgoraRTC.createClient({ mode: 'rtc', codec: 'opus' });
+    callEngine = client;
+
+    client.on('user-published', async (user, mediaType) => {
+      await client.subscribe(user, mediaType);
+      if (mediaType === 'audio' && user.audioTrack) user.audioTrack.play();
+    });
+    client.on('user-unpublished', (user, mediaType) => {
+      if (mediaType === 'audio' && user.audioTrack) user.audioTrack.stop();
+    });
+    client.on('user-left', async () => {
+      await hangupCall(callId);
+    });
+
+    await client.join(token, channel, CALL_ADMIN_UID);
+    const mic = await AgoraRTC.createMicrophoneAudioTrack();
+    callMicTrack = mic;
+    await client.publish(mic);
+    await db.collection('calls').doc(callId).update({
+      status: 'ongoing',
+      startedAt: firebase.firestore.FieldValue.serverTimestamp(),
+    });
+    showActiveCall(data);
+    toast('مكالمة جارية الآن — ' + (data.callerName || ''));
+  } catch (err) {
+    callInProgress = false;
+    try { if (callMicTrack) { callMicTrack.close(); callMicTrack = null; } } catch {}
+    try { if (callEngine) await callEngine.leave(); } catch {}
+    callEngine = null;
+    toast('تعذر الرد على المكالمة: ' + ((err && err.message) || err), true);
+  }
+}
+
+async function hangupCall(callId) {
+  try {
+    await db.collection('calls').doc(callId).update({
+      status: 'ended',
+      endedAt: firebase.firestore.FieldValue.serverTimestamp(),
+      endReason: 'admin_ended',
+    });
+  } catch {}
+  clearActiveCallTicker();
+  closeActiveCallOverlay();
+  try { if (callMicTrack) { callMicTrack.close(); callMicTrack = null; } } catch {}
+  try { if (callEngine) await callEngine.leave(); } catch {}
+  callEngine = null;
+  callInProgress = false;
+}
+
+function renderCallsTable() {
+  const tbody = $('#calls-body');
+  if (!tbody) return;
+  if (!callsState.length) {
+    tbody.innerHTML = '<tr><td colspan="6" class="empty-cell">لا توجد مكالمات بعد</td></tr>';
+    return;
+  }
+  tbody.innerHTML = '';
+  callsState.forEach((c, i) => {
+    const created = c.createdAt ? fmtDate(c.createdAt) : '—';
+    let duration = '—';
+    if (c.startedAt && c.endedAt) {
+      const start = c.startedAt.toDate ? c.startedAt.toDate() : new Date(c.startedAt);
+      const end = c.endedAt.toDate ? c.endedAt.toDate() : new Date(c.endedAt);
+      const diff = Math.max(0, Math.round((end - start) / 1000));
+      duration = String(Math.floor(diff / 60)).padStart(2, '0') + ':' + String(diff % 60).padStart(2, '0');
+    }
+    const tr = document.createElement('tr');
+    tr.innerHTML =
+      '<td>' + (i + 1) + '</td>' +
+      '<td>' + esc(c.callerName || c.callerId || '—') + '</td>' +
+      '<td>' + esc(callRoleLabel(c.callerRole)) + '</td>' +
+      '<td>' + esc(created) + '</td>' +
+      '<td>' + esc(CALL_STATUS_LABELS[c.status] || c.status || '—') + '</td>' +
+      '<td>' + duration + '</td>';
+    tbody.appendChild(tr);
+  });
+}
+
+function refreshCallsBadge() {
+  const count = callsState.filter((c) => c.status === 'ringing' && c.calleeId === CALL_ADMIN_ID).length;
+  setNavBadge('calls', count);
+}
+
+function initCallsListener() {
+  stopCallsListener();
+  expireStaleCalls();
+  callsSub = db.collection('calls')
+    .orderBy('created_at', 'desc')
+    .limit(80)
+    .onSnapshot((snap) => {
+      callsState = snap.docs.map((d) => ({ id: d.id, ...d.data() }));
+      callsState.slice().reverse().forEach((c) => {
+        if (c.status === 'ringing' && c.calleeId === CALL_ADMIN_ID && !handledRinging.has(c.id)) {
+          handledRinging.add(c.id);
+          const createdAt = c.createdAt && c.createdAt.toDate ? c.createdAt.toDate() : new Date();
+          if (Date.now() - createdAt.getTime() < RING_TIMEOUT_MS + 15000) showIncomingCall(c);
+        }
+      });
+      refreshCallsBadge();
+      renderCallsTable();
+    }, () => {});
+}
+
+async function expireStaleCalls() {
+  const cutoff = new Date(Date.now() - (RING_TIMEOUT_MS + 15000));
+  try {
+    const snap = await db.collection('calls')
+      .where('calleeId', '==', CALL_ADMIN_ID)
+      .where('status', '==', 'ringing')
+      .get();
+    for (const doc of snap.docs) {
+      const d = doc.data();
+      const createdAt = d.createdAt && d.createdAt.toDate ? d.createdAt.toDate() : new Date();
+      if (createdAt < cutoff) {
+        await doc.ref.update({
+          status: 'missed',
+          endReason: 'admin_unavailable',
+          endedAt: firebase.firestore.FieldValue.serverTimestamp(),
+        });
+      }
+    }
+  } catch {}
+}
+
+function stopCallsListener() {
+  if (callsSub) { callsSub(); callsSub = null; }
+  stopRingTone();
+  clearActiveCallTicker();
+  closeActiveCallOverlay();
+  try { if (callMicTrack) { callMicTrack.close(); callMicTrack = null; } } catch {}
+  try { if (callEngine) callEngine.leave(); } catch {}
+  callEngine = null;
+  callInProgress = false;
+  activeRingCallId = null;
+}
+
+async function loadCalls() {
+  const snap = await db.collection('calls').orderBy('created_at', 'desc').limit(80).get();
+  callsState = snap.docs.map((d) => ({ id: d.id, ...d.data() }));
+  refreshCallsBadge();
+  renderCallsTable();
+}
+
 /* ---------- Login ---------- */
 
 async function handleLogin(e) {
@@ -334,6 +713,7 @@ async function handleLogin(e) {
 function logout() {
   ADMIN = null;
   stopActivityPoller();
+  stopCallsListener();
   sessionStorage.removeItem('hamada_admin');
   $('#login-screen').classList.remove('hidden');
   $('#app-screen').classList.add('hidden');
@@ -350,6 +730,7 @@ function enterApp() {
   startClock();
   startActivityPoller();
   refreshNavBadges();
+  initCallsListener();
 }
 
 /* ---------- Navigation ---------- */
@@ -358,6 +739,7 @@ const TITLES = {
   dashboard: 'لوحة الإحصائيات',
   requests: 'طلبات الاشتراك',
   orders: 'الطلبات',
+  calls: 'المكالمات',
   providers: 'أصحاب التوصيل',
   customers: 'الزبائن',
   areas: 'المناطق',
@@ -378,6 +760,7 @@ async function loadView(name) {
     if (name === 'dashboard') await loadDashboard();
     if (name === 'requests') await loadRequests();
     if (name === 'orders') await loadOrders();
+    if (name === 'calls') await loadCalls();
     if (name === 'providers') await loadProviders();
     if (name === 'customers') await loadCustomers();
     if (name === 'areas') await loadAreas();
