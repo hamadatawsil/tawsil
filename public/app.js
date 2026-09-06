@@ -597,12 +597,20 @@ function reviewRequest(id, action) {
           const provSnap = await db.collection('providers').where('phone', '==', req.phone).limit(1).get();
           if (!provSnap.empty) existingProvider = provSnap.docs[0];
 
+          let personalPhoto = '';
+          if (Array.isArray(req.documents)) {
+            const personal = req.documents.find(d => d.category === 'personal');
+            if (personal && personal.data) personalPhoto = personal.data;
+          }
+
           if (existingProvider) {
-            await existingProvider.ref.update({
+            const upd = {
               subscription_active: true,
               subscription_start: now,
               subscription_end: endDate,
-            });
+            };
+            if (personalPhoto) upd.photo = personalPhoto;
+            await existingProvider.ref.update(upd);
           } else {
             await db.collection('providers').add({
               name: req.name,
@@ -616,6 +624,7 @@ function reviewRequest(id, action) {
               subscription_end: endDate,
               blocked: false,
               created_at: now,
+              photo: personalPhoto || '',
             });
           }
 
@@ -736,13 +745,20 @@ async function saveReviewDocs(btn) {
       const now = firebase.firestore.FieldValue.serverTimestamp();
       const endDate = new Date(Date.now() + 365 * 24 * 3600 * 1000);
       const provSnap = await db.collection('providers').where('phone', '==', req.phone).limit(1).get();
+      let personalPhoto = '';
+      if (Array.isArray(req.documents)) {
+        const personal = req.documents.find(d => d.category === 'personal');
+        if (personal && personal.data) personalPhoto = personal.data;
+      }
       if (!provSnap.empty) {
-        await provSnap.docs[0].ref.update({ subscription_active: true, subscription_start: now, subscription_end: endDate });
+        const upd = { subscription_active: true, subscription_start: now, subscription_end: endDate };
+        if (personalPhoto) upd.photo = personalPhoto;
+        await provSnap.docs[0].ref.update(upd);
       } else {
         await db.collection('providers').add({
           name: req.name, phone: req.phone, password: req.password || '', plate: '', rating: 0,
           is_connected: false, subscription_active: true, subscription_start: now, subscription_end: endDate,
-          blocked: false, created_at: now,
+          blocked: false, created_at: now, photo: personalPhoto || '',
         });
       }
       await logActivity('قبول اشتراك', req.name);
@@ -1007,7 +1023,11 @@ async function loadProviders() {
   body.innerHTML = providersState
     .map((p) =>
       '<tr>' +
-      '<td style="font-size:11px;max-width:80px;overflow:hidden;text-overflow:ellipsis" title="' + esc(p.id) + '">' + esc(p.id.substring(0, 8)) + '</td>' +
+      '<td style="max-width:70px">' +
+      (p.photo
+        ? '<img class="prov-avatar" src="data:image/jpeg;base64,' + esc(p.photo) + '" onclick="openDocImage(this.src,\'' + esc(p.name) + '\')" style="width:38px;height:38px;border-radius:50%;object-fit:cover;cursor:pointer" title="' + esc(p.id) + '">'
+        : '<div style="width:38px;height:38px;border-radius:50%;background:#e5e7eb" title="' + esc(p.id) + '"></div>') +
+      '</td>' +
       '<td><strong>' + esc(p.name) + '</strong>' +
       (p.blocked ? ' <span class="badge rejected">محظور</span>' : '') +
       '</td>' +
