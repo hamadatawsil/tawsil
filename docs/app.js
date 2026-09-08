@@ -564,6 +564,10 @@ async function answerIncomingCall(data) {
   try {
     callInProgress = true;
     const channel = data.channelName || ('call_' + callId);
+
+    const mic = await AgoraRTC.createMicrophoneAudioTrack();
+    callMicTrack = mic;
+
     const token = await agoraToken(
       AGORA_APP_ID, AGORA_APP_CERT, channel, CALL_ADMIN_UID,
       Math.floor(Date.now() / 1000) + 86400
@@ -583,8 +587,6 @@ async function answerIncomingCall(data) {
     });
 
     await client.join(token, channel, CALL_ADMIN_UID);
-    const mic = await AgoraRTC.createMicrophoneAudioTrack();
-    callMicTrack = mic;
     await client.publish(mic);
     await db.collection('calls').doc(callId).update({
       status: 'ongoing',
@@ -598,7 +600,10 @@ async function answerIncomingCall(data) {
     try { if (callMicTrack) { callMicTrack.close(); callMicTrack = null; } } catch {}
     try { if (callEngine) await callEngine.leave(); } catch {}
     callEngine = null;
-    const msg = (err && (err.message || err.code || err.reason)) || String(err) || 'خطأ غير معروف';
+    let msg = (err && (err.message || err.code || err.reason)) || String(err) || 'خطأ غير معروف';
+    if (/NotAllowed|Permission|denied/i.test(err && (err.message || err.code))) {
+      msg = 'ممنوع الوصول إلى الميكروفون. اسمح بالميكروفون في المتصفح ثم أعد المحاولة.';
+    }
     toast('تعذر الرد على المكالمة: ' + msg, true);
   }
 }
