@@ -596,7 +596,7 @@ async function answerIncomingCall(data) {
       AGORA_APP_ID, AGORA_APP_CERT, channel, CALL_ADMIN_UID,
       Math.floor(Date.now() / 1000) + 86400
     );
-    const client = AgoraRTC.createClient({ mode: 'rtc', codec: 'opus' });
+    const client = AgoraRTC.createClient({ mode: 'rtc' });
     callEngine = client;
 
     client.on('user-published', async (user, mediaType) => {
@@ -624,6 +624,7 @@ async function answerIncomingCall(data) {
     try { if (callMicTrack) { callMicTrack.close(); callMicTrack = null; } } catch {}
     try { if (callEngine) await callEngine.leave(); } catch {}
     callEngine = null;
+    try { await endCallDoc(callId, 'missed', 'admin_error'); } catch {}
     let msg = (err && (err.message || err.code || err.reason)) || String(err) || 'خطأ غير معروف';
     if (/NotAllowed|Permission|denied/i.test(err && (err.message || err.code))) {
       msg = 'ممنوع الوصول إلى الميكروفون. اسمح بالميكروفون في المتصفح ثم أعد المحاولة.';
