@@ -427,36 +427,49 @@ async function agoraToken(appId, appCert, channel, uid, expireTs) {
   return '006' + appId + agBase64(content);
 }
 
-function startRingTone() {
-  stopRingTone();
-  ensureAudio();
-  const ringCycle = () => { ringBurst(0); ringBurst(1.15); };
-  ringCycle();
-  ringToneTimer = setInterval(ringCycle, 5200);
+const BUILD_CACHE = '20260908-4';
+let ringBuffer = null;
+let ringSource = null;
+let ringBufferLoading = null;
+
+function loadRingBuffer() {
+  if (ringBuffer || ringBufferLoading) return ringBufferLoading;
+  ringBufferLoading = fetch('ringtone.wav?v=' + BUILD_CACHE)
+    .then((r) => r.arrayBuffer())
+    .then((ab) => audioCtx.decodeAudioData(ab))
+    .then((buf) => { ringBuffer = buf; return buf; })
+    .catch((err) => {
+      console.error('[ringtone] load failed', err);
+      ringBuffer = null;
+    });
+  return ringBufferLoading;
 }
 
-function ringBurst(delay) {
-  if (!audioCtx || !soundEnabled) return;
-  const t = audioCtx.currentTime + delay;
-  const osc = audioCtx.createOscillator();
-  const gain = audioCtx.createGain();
-  osc.type = 'sine';
-  osc.frequency.setValueAtTime(1030, t);
-  osc.frequency.exponentialRampToValueAtTime(920, t + 0.35);
-  osc.frequency.setValueAtTime(920, t + 0.45);
-  osc.frequency.exponentialRampToValueAtTime(1010, t + 0.75);
-  gain.gain.setValueAtTime(0.0001, t);
-  gain.gain.exponentialRampToValueAtTime(0.22, t + 0.04);
-  gain.gain.setValueAtTime(0.22, t + 0.5);
-  gain.gain.exponentialRampToValueAtTime(0.0001, t + 0.8);
-  osc.connect(gain);
-  gain.connect(audioCtx.destination);
-  osc.start(t);
-  osc.stop(t + 0.85);
+function startRingTone() {
+  stopRingTone();
+  if (!soundEnabled) return;
+  ensureAudio();
+  if (!audioCtx) return;
+  const play = () => {
+    if (!ringBuffer || !audioCtx || ringSource) return;
+    const src = audioCtx.createBufferSource();
+    src.buffer = ringBuffer;
+    src.loop = true;
+    src.connect(audioCtx.destination);
+    src.start();
+    ringSource = src;
+  };
+  if (ringBuffer) play();
+  else loadRingBuffer().then(() => { if (audioCtx && audioCtx.state === 'suspended') audioCtx.resume(); play(); });
 }
 
 function stopRingTone() {
   if (ringToneTimer) { clearInterval(ringToneTimer); ringToneTimer = null; }
+  if (ringSource) {
+    try { ringSource.stop(); } catch (_) {}
+    try { ringSource.disconnect(); } catch (_) {}
+    ringSource = null;
+  }
 }
 
 async function endCallDoc(callId, status, reason) {
@@ -475,13 +488,24 @@ function showIncomingCall(data) {
       '<div class="incoming-call-avatar">☎</div>' +
       '<div class="incoming-call-name">' + esc(name) + '</div>' +
       '<div class="incoming-call-role">' + esc(callRoleLabel(data.callerRole)) + '</div>' +
-      '<div class="call-status-ring">يرن الآن...</div>',
+      '<div class="call-status-ring">يرن الآن...</div>' +
+      '<div id="incoming-mic-hint" class="incoming-mic-hint"></div>',
     foot:
       '<button class="modal-btn no" data-decline>رفض</button>' +
       '<button class="modal-btn ok" data-answer>قبول</button>',
   });
   const titleClose = overlay.querySelector('.doc-lightbox-head .btn-sm');
   if (titleClose) titleClose.style.display = 'none';
+  const micHint = overlay.querySelector('#incoming-mic-hint');
+  if (micHint && navigator.permissions && navigator.permissions.query) {
+    navigator.permissions.query({ name: 'microphone' }).then((st) => {
+      if (st.state === 'denied') {
+        micHint.textContent = 'إذن الميكروفون مرفوض لهذا الموقع — افتح القفل قرب العنوان وفعّل «الميكروفون: السماح»، ثم أعد تحميل الصفحة.';
+      } else if (st.state === 'prompt') {
+        micHint.textContent = 'سيطلب المتصفح إذن الميكروفون عند القبول — اضغط «السماح».';
+      }
+    }).catch(() => {});
+  }
   startRingTone();
 
   const close = () => {
