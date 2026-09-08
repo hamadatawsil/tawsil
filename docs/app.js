@@ -26,6 +26,7 @@ let callsSub = null;
 let ringToneTimer = null;
 let activeRingCallId = null;
 let callEngine = null;
+let callMicTrack = null;
 let callInProgress = false;
 const handledRinging = new Set();
 
@@ -629,21 +630,29 @@ function refreshCallsBadge() {
 function initCallsListener() {
   stopCallsListener();
   expireStaleCalls();
-  callsSub = db.collection('calls')
-    .orderBy('created_at', 'desc')
-    .limit(80)
-    .onSnapshot((snap) => {
-      callsState = snap.docs.map((d) => ({ id: d.id, ...d.data() }));
-      callsState.slice().reverse().forEach((c) => {
-        if (c.status === 'ringing' && c.calleeId === CALL_ADMIN_ID && !handledRinging.has(c.id)) {
-          handledRinging.add(c.id);
-          const createdAt = c.createdAt && c.createdAt.toDate ? c.createdAt.toDate() : new Date();
-          if (Date.now() - createdAt.getTime() < RING_TIMEOUT_MS + 15000) showIncomingCall(c);
-        }
+  try {
+    callsSub = db.collection('calls')
+      .orderBy('createdAt', 'desc')
+      .limit(80)
+      .onSnapshot((snap) => {
+        callsState = snap.docs.map((d) => ({ id: d.id, ...d.data() }));
+        callsState.slice().reverse().forEach((c) => {
+          if (c.status === 'ringing' && c.calleeId === CALL_ADMIN_ID && !handledRinging.has(c.id)) {
+            handledRinging.add(c.id);
+            const createdAt = c.createdAt && c.createdAt.toDate ? c.createdAt.toDate() : new Date();
+            if (Date.now() - createdAt.getTime() < RING_TIMEOUT_MS + 15000) showIncomingCall(c);
+          }
+        });
+        refreshCallsBadge();
+        renderCallsTable();
+      }, (err) => {
+        console.error('[calls] listener error', err);
+        toast('خطأ في استقبال المكالمات: ' + ((err && err.message) || err), true);
       });
-      refreshCallsBadge();
-      renderCallsTable();
-    }, () => {});
+  } catch (err) {
+    console.error('[calls] init error', err);
+    toast('تعذر تشغيل استقبال المكالمات: ' + ((err && err.message) || err), true);
+  }
 }
 
 async function expireStaleCalls() {
@@ -680,7 +689,7 @@ function stopCallsListener() {
 }
 
 async function loadCalls() {
-  const snap = await db.collection('calls').orderBy('created_at', 'desc').limit(80).get();
+  const snap = await db.collection('calls').orderBy('createdAt', 'desc').limit(80).get();
   callsState = snap.docs.map((d) => ({ id: d.id, ...d.data() }));
   refreshCallsBadge();
   renderCallsTable();
