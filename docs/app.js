@@ -430,10 +430,29 @@ async function agoraToken(appId, appCert, channel, uid, expireTs) {
 function startRingTone() {
   stopRingTone();
   ensureAudio();
-  ringToneTimer = setInterval(() => {
-    beep(880, 0, 0.34, 0.24);
-    beep(880, 0.4, 0.34, 0.24);
-  }, 1350);
+  const ringCycle = () => { ringBurst(0); ringBurst(1.15); };
+  ringCycle();
+  ringToneTimer = setInterval(ringCycle, 5200);
+}
+
+function ringBurst(delay) {
+  if (!audioCtx || !soundEnabled) return;
+  const t = audioCtx.currentTime + delay;
+  const osc = audioCtx.createOscillator();
+  const gain = audioCtx.createGain();
+  osc.type = 'sine';
+  osc.frequency.setValueAtTime(1030, t);
+  osc.frequency.exponentialRampToValueAtTime(920, t + 0.35);
+  osc.frequency.setValueAtTime(920, t + 0.45);
+  osc.frequency.exponentialRampToValueAtTime(1010, t + 0.75);
+  gain.gain.setValueAtTime(0.0001, t);
+  gain.gain.exponentialRampToValueAtTime(0.22, t + 0.04);
+  gain.gain.setValueAtTime(0.22, t + 0.5);
+  gain.gain.exponentialRampToValueAtTime(0.0001, t + 0.8);
+  osc.connect(gain);
+  gain.connect(audioCtx.destination);
+  osc.start(t);
+  osc.stop(t + 0.85);
 }
 
 function stopRingTone() {
@@ -536,6 +555,11 @@ function showActiveCall(data) {
 }
 
 async function answerIncomingCall(data) {
+  if (typeof AgoraRTC === 'undefined') {
+    toast('فشل تحميل نظام المكالمات (Agora SDK). أعد تحميل الصفحة وتحقق من الإنترنت.', true);
+    callInProgress = false;
+    return;
+  }
   const callId = data.id;
   try {
     callInProgress = true;
@@ -570,10 +594,12 @@ async function answerIncomingCall(data) {
     toast('مكالمة جارية الآن — ' + (data.callerName || ''));
   } catch (err) {
     callInProgress = false;
+    console.error('[calls] answer error', err);
     try { if (callMicTrack) { callMicTrack.close(); callMicTrack = null; } } catch {}
     try { if (callEngine) await callEngine.leave(); } catch {}
     callEngine = null;
-    toast('تعذر الرد على المكالمة: ' + ((err && err.message) || err), true);
+    const msg = (err && (err.message || err.code || err.reason)) || String(err) || 'خطأ غير معروف';
+    toast('تعذر الرد على المكالمة: ' + msg, true);
   }
 }
 
