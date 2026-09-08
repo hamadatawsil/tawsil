@@ -625,8 +625,13 @@ async function answerIncomingCall(data) {
     try { if (callEngine) await callEngine.leave(); } catch {}
     callEngine = null;
     try { await endCallDoc(callId, 'missed', 'admin_error'); } catch {}
-    let msg = (err && (err.message || err.code || err.reason)) || String(err) || 'خطأ غير معروف';
-    if (/NotAllowed|Permission|denied/i.test(err && (err.message || err.code))) {
+    let msg;
+    if (err && err.code) {
+      msg = '[' + (err.name || 'AgoraRTCError') + ' ' + err.code + '] ' + (err.message || String(err));
+    } else {
+      msg = (err && (err.message || err.reason || String(err))) || 'خطأ غير معروف';
+    }
+    if (/NotAllowed|Permission|denied/i.test(msg)) {
       msg = 'ممنوع الوصول إلى الميكروفون. اسمح بالميكروفون في المتصفح ثم أعد المحاولة.';
     }
     toast('تعذر الرد على المكالمة: ' + msg, true);
