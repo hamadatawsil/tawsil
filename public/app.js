@@ -12,6 +12,9 @@ const AGORA_APP_CERT = '4f051a05587648238e6d208198db110f';
 const CALL_ADMIN_ID = 'admin';
 const CALL_ADMIN_UID = 2;
 const RING_TIMEOUT_MS = 60000;
+const RUN_SHA = 'v20260908-7';
+
+try { console.log('[app] built:', RUN_SHA, '| AgoraRTC version:', (typeof AgoraRTC !== 'undefined' ? AgoraRTC.VERSION : 'غير محمّل')); } catch (_) {}
 
 const CALL_STATUS_LABELS = {
   ringing: 'يرن',
@@ -657,6 +660,8 @@ async function hangupCall(callId) {
 function renderCallsTable() {
   const tbody = $('#calls-body');
   if (!tbody) return;
+  const buildEl = document.getElementById('calls-build-tag');
+  if (buildEl) buildEl.textContent = 'البناء: ' + RUN_SHA + ' | SDK: ' + (typeof AgoraRTC !== 'undefined' ? AgoraRTC.VERSION : 'غير محمّل');
   if (!callsState.length) {
     tbody.innerHTML = '<tr><td colspan="6" class="empty-cell">لا توجد مكالمات بعد</td></tr>';
     return;
