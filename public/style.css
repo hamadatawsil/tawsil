@@ -96,6 +96,23 @@ body {
 .error-text { color: var(--danger); text-align: center; margin-top: 12px; font-weight: 600; }
 .msg-text { margin-top: 12px; font-weight: 600; }
 
+/* طلب صلاحية مشرف: مطويّ افتراضياً حتى لا يزاحم نموذج الدخول. */
+.login-extra { margin-top: 20px; border-top: 1px solid var(--border, #e6e8ec); padding-top: 14px; }
+.login-extra > summary {
+  cursor: pointer;
+  text-align: center;
+  font-weight: 600;
+  color: var(--primary-dark);
+  list-style: none;
+}
+.login-extra > summary::-webkit-details-marker { display: none; }
+.login-extra > summary::after { content: ' ▾'; }
+.login-extra[open] > summary::after { content: ' ▴'; }
+.login-extra label { display: block; margin: 10px 0 4px; font-weight: 600; }
+.login-extra input { width: 100%; padding: 9px 12px; border: 1px solid var(--border, #d9dce2); border-radius: 8px; font: inherit; }
+.login-extra .btn-ghost { width: 100%; margin-top: 14px; }
+.login-extra .login-sub { margin: 8px 0 4px; font-size: 12px; }
+
 /* ---------- App layout ---------- */
 .app { display: flex; height: 100vh; }
 

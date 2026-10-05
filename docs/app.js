@@ -1,6 +1,7 @@
-﻿'use strict';
+'use strict';
 
 const db = firebase.firestore();
+const auth = firebase.auth();
 let ADMIN = null;
 let ordersState = [];
 let providersState = [];
@@ -12,7 +13,7 @@ const AGORA_APP_CERT = '4f051a05587648238e6d208198db110f';
 const CALL_ADMIN_ID = 'admin';
 const CALL_ADMIN_UID = 2;
 const RING_TIMEOUT_MS = 60000;
-const RUN_SHA = 'v20260908-7';
+const RUN_SHA = 'v20261005-1';
 
 try { console.log('[app] built:', RUN_SHA, '| AgoraRTC version:', (typeof AgoraRTC !== 'undefined' ? AgoraRTC.VERSION : 'غير محمّل')); } catch (_) {}
 
@@ -761,34 +762,309 @@ async function loadCalls() {
   renderCallsTable();
 }
 
-/* ---------- Login ---------- */
+/* ---------- الدخول ---------- */
+
+/*
+ * الدخول يمرّ على Firebase Auth ثم على القاعدة، وهو ترتيب لا يُعكس:
+ *
+ * - **القاعدة لا تُخزّن كلمة المرور anymore.** تشترط وجود `admins/{uid}`
+ *   باسم الـuid نفسه، فالاسم وحده لا يعطي أحداً صلاحية. لو بقيت
+ *   المقارنة داخل الصفحة لأمكن تعديل `app.js` من أي متصفح ليتجاوزها،
+ *   ولأمكن لأي شخص أن يكتب ما يشاء في `admins` لأنها كانت مفتوحة.
+ * - **بلا حدّ للمحاولات.** لا عدّاد ولا تجميد ولا تأخير: من ينسى كلمة
+ *   مروره يعيدها متى شاء. الحماية الحقيقية هي Firebase Auth نفسه.
+ */
+
+/** خرائط اسم المستخدم إلى بريد Auth، فيبقى الحقلان كما هما في الشاشة. */
+const AUTH_EMAIL_BY_USERNAME = { admin: 'admin@tawsil.app' };
+
+function authEmailFor(username) {
+  return AUTH_EMAIL_BY_USERNAME[username] || (username.indexOf('@') > -1 ? username : '');
+}
+
+/** يقرأ ملف المشرف ويعيده، أو null إن لم يكن مشرفاً. */
+async function loadAdminProfile(uid) {
+  const doc = await db.collection('admins').doc(uid).get();
+  if (!doc.exists) return null;
+  return { id: doc.id, uid, ...doc.data() };
+}
 
 async function handleLogin(e) {
   e.preventDefault();
   const username = $('#login-username').value.trim();
   const password = $('#login-password').value;
+  const email = authEmailFor(username);
+  $('#login-error').classList.add('hidden');
+  $('#login-notadmin').classList.add('hidden');
+  if (!email) {
+    $('#login-error').textContent = 'اسم المستخدم غير معروف. أدخّل "admin" أو بريدك.';
+    $('#login-error').classList.remove('hidden');
+    return;
+  }
   $('#login-btn').textContent = 'جاري الدخول...';
   try {
-    const snap = await db.collection('admins').where('username', '==', username).limit(1).get();
-    if (snap.empty) throw new Error('اسم المستخدم أو كلمة المرور غير صحيحة');
-    const doc = snap.docs[0];
-    const data = doc.data();
-    if (data.password !== password) throw new Error('اسم المستخدم أو كلمة المرور غير صحيحة');
-    ADMIN = { id: doc.id, username: data.username, full_name: data.full_name, role: data.role };
+    const cred = await auth.signInWithEmailAndPassword(email, password);
+    const profile = await loadAdminProfile(cred.user.uid);
+    if (!profile) {
+      // **حساب صحيح بلا صلاحية:** ليست رسالة خطأ، بل حالة قائمة.
+      await auth.signOut();
+      $('#login-notadmin').classList.remove('hidden');
+      return;
+    }
+    ADMIN = profile;
     sessionStorage.setItem('hamada_admin', JSON.stringify(ADMIN));
     enterApp();
   } catch (err) {
-    $('#login-error').textContent = err.message;
+    const map = {
+      'auth/invalid-credential': 'اسم المستخدم أو كلمة المرور غير صحيحة',
+      'auth/user-not-found': 'اسم المستخدم أو كلمة المرور غير صحيحة',
+      'auth/wrong-password': 'اسم المستخدم أو كلمة المرور غير صحيحة',
+      'auth/invalid-email': 'اسم المستخدم غير معروف',
+      'auth/too-many-requests': 'محاولات كثيرة من هذا الجهاز. انتظر قليلاً ثم أعد المحاولة',
+      'auth/network-request-failed': 'تعذّر الاتصال بالإنترنت',
+    };
+    $('#login-error').textContent = map[err.code] || 'تعذّر الدخول: ' + err.message;
     $('#login-error').classList.remove('hidden');
   } finally {
     $('#login-btn').textContent = 'دخول';
   }
 }
 
+/* ---------- طلب صلاحية مشرف ---------- */
+
+/*
+ * الطلب لا يعطي صلاحية: يكفي أن يُنشأ حساب وكتابة سطر طلب. والقبول هو
+ * الذي يكتب `admins/{uid}`، ولا يستطيعه إلا مشرف قائم. فطريق الموظف
+ * إلى الصفة طويل، والطريق الوحيد القصير هو موافقتك.
+ */
+
+async function handleAdminRequest() {
+  const name = $('#req-name').value.trim();
+  const email = $('#req-email').value.trim();
+  const pass = $('#req-password').value;
+  const pass2 = $('#req-password2').value;
+  const msg = $('#req-msg');
+  const say = (t, bad) => { msg.textContent = t; msg.classList.toggle('hidden', false); msg.style.color = bad ? '#e5484d' : '#2f9e44'; };
+  if (!name || !email || !pass) return say('املأ الاسم والبريد وكلمة المرور', true);
+  if (pass !== pass2) return say('كلمتا المرور غير متطابقتين', true);
+  if (pass.length < 6) return say('كلمة المرور يجب 6 محارف على الأقل', true);
+  $('#req-btn').textContent = 'جاري الإرسال...';
+  try {
+    const cred = await auth.createUserWithEmailAndPassword(email, pass);
+    await db.collection('admin_requests').doc(cred.user.uid).set({
+      full_name: name,
+      email,
+      requested_at: firebase.firestore.FieldValue.serverTimestamp(),
+      status: 'pending',
+    });
+    $('#req-name').value = ''; $('#req-email').value = '';
+    $('#req-password').value = ''; $('#req-password2').value = '';
+    say('تم إرسال الطلب. بانتظار موافقة مدير اللوحة.');
+  } catch (err) {
+    if (err.code === 'auth/email-already-in-use') say('هذا البريد مستخدم. ادخل مباشرة بكلمة مروره.', true);
+    else if (err.code === 'auth/weak-password') say('كلمة المرور ضعيفة. استخدم 6 محارف فأكثر.', true);
+    else say('تعذّر الإرسال: ' + err.message, true);
+  } finally {
+    $('#req-btn').textContent = 'إرسال الطلب';
+  }
+}
+
+async function approveAdminRequest(uid) {
+  const req = await db.collection('admin_requests').doc(uid).get();
+  if (!req.exists) return;
+  const d = req.data();
+  await db.collection('admins').doc(uid).set({
+    uid,
+    email: d.email || '',
+    username: d.email || '',
+    full_name: d.full_name || '',
+    role: 'admin',
+    createdAt: firebase.firestore.FieldValue.serverTimestamp(),
+  });
+  await db.collection('admin_requests').doc(uid).delete();
+  logActivity('قبول مشرف جديد', d.full_name || d.email || uid);
+  toast('تم إعطاء الصلاحية: ' + (d.full_name || d.email));
+  loadAdmins();
+}
+
+async function declineAdminRequest(uid) {
+  const req = await db.collection('admin_requests').doc(uid).get();
+  const who = req.exists ? (req.data().full_name || req.data().email) : uid;
+  await db.collection('admin_requests').doc(uid).delete();
+  logActivity('رفض طلب مشرف', who);
+  toast('تم رفض الطلب');
+  loadAdmins();
+}
+
+async function removeAdmin(uid) {
+  if (uid === ADMIN.uid) return toast('لا يمكنك إزالة نفسك', true);
+  if (!confirm('إزالة هذه الصلاحية؟')) return;
+  const doc = await db.collection('admins').doc(uid).get();
+  const who = doc.exists ? (doc.data().full_name || doc.data().email) : uid;
+  await db.collection('admins').doc(uid).delete();
+  logActivity('إزالة مشرف', who);
+  toast('أُزيلت الصلاحية');
+  loadAdmins();
+}
+
+async function loadAdmins() {
+  const reqBody = $('#adminreq-body');
+  const admBody = $('#admins-body');
+  if (!reqBody || !admBody) return;
+
+  const reqs = await db.collection('admin_requests').get();
+  const reqsState = reqs.docs.map((d) => ({ id: d.id, ...d.data() }));
+  setNavBadge('admins', reqsState.length);
+  reqBody.innerHTML = reqsState.length
+    ? reqsState.map((r) =>
+        '<tr><td><strong>' + esc(r.full_name || '—') + '</strong></td>' +
+        '<td>' + esc(r.email || '—') + '</td>' +
+        '<td>' + fmtDateShort(r.requested_at) + '</td>' +
+        '<td><div class="row-actions">' +
+        '<button class="btn-sm ok" onclick="approveAdminRequest(\'' + r.id + '\')">قبول</button>' +
+        '<button class="btn-sm no" onclick="declineAdminRequest(\'' + r.id + '\')">رفض</button>' +
+        '</div></td></tr>').join('')
+    : '<tr class="empty-row"><td colspan="4">لا توجد طلبات</td></tr>';
+
+  const adm = await db.collection('admins').get();
+  const admState = adm.docs.map((d) => ({ id: d.id, ...d.data() }));
+  admBody.innerHTML = admState.length
+    ? admState.map((a) =>
+        '<tr><td><strong>' + esc(a.full_name || '—') + '</strong></td>' +
+        '<td>' + esc(a.email || a.username || '—') + '</td>' +
+        '<td>' + esc(a.role || 'admin') + '</td>' +
+        '<td>' + fmtDateShort(a.createdAt) + '</td>' +
+        '<td><div class="row-actions">' +
+        (a.id === ADMIN.uid
+          ? '<span class="badge inactive">أنت</span>'
+          : '<button class="btn-sm no" onclick="removeAdmin(\'' + a.id + '\')">إزالة</button>') +
+        '</div></td></tr>').join('')
+    : '<tr class="empty-row"><td colspan="5">لا يوجد مشرفون</td></tr>';
+}
+
+/* ---------- الزبائن الجدد ---------- */
+
+/*
+ * الإشعار يبدأ من الزبون نفسه لا من التطبيق: التطبيق لا يكتب في
+ * `activity_log` لأن ذلك يمنح أي زبون حقّ الكتابة في سجل الإدارة.
+ * فاللوحة تقرأ `customers` وترى من هو جديد، ثم تكتب سطر النشاط **هي**
+ * بعد أنzczحقت من Firebase Auth. فالسجل لا يقبل إلا من مشرف، والمشرف
+ * وحده يقرّر أنه رأى الزبون.
+ *
+ * **والمعرّف `customer_<phone>` لا اعتباطي:** لو استعملنا `add()` لأنشأ
+ * السطر نفسه كل مرة تفتح فيها اللوحة، فتضخّم «سجل النشاط» بلا سبب.
+ * بمعرّف ثابت، الكتابة الثانية تصطدم بالمستند الموجود فتُتجاهل.
+ */
+
+const SEEN_KEY = 'hamada_seen_customers';
+const PENDING_KEY = 'hamada_pending_customers';
+let seenCustomers = null;
+let pendingCustomers = null;
+let baselinePending = false;
+let customerPollTimer = null;
+
+function loadSeenCustomers() {
+  const read = (k) => {
+    try { return new Set(JSON.parse(localStorage.getItem(k) || '[]')); }
+    catch { return new Set(); }
+  };
+  seenCustomers = read(SEEN_KEY);
+  pendingCustomers = read(PENDING_KEY);
+  // **الخط أساس لا إخبار:** أول تشغيل بعد نشر الكود يجب ألّا يطلق
+  // إشعاراً عن زبائن قدامى أضيفوا قبل وجود هذه الميزة.
+  if (!localStorage.getItem(SEEN_KEY)) baselinePending = true;
+}
+
+function saveSeenCustomers() {
+  try {
+    localStorage.setItem(SEEN_KEY, JSON.stringify([...seenCustomers]));
+    localStorage.setItem(PENDING_KEY, JSON.stringify([...pendingCustomers]));
+  } catch {}
+}
+
+/**
+ * يرى الزبون الجديد ويحفظه «معلقاً» حتى يفتح المشرف القائمة.
+ *
+ * **الفصل بين `seen` و`pending` هو ما يجعل الشارة لها معنى:** لو أضاف
+ * المستكشفُ الزبونَ إلى `seen` عند رؤيته، لصارت الشارة صفراً بعد ثانية —
+ *-Shارة تعني «يوجد من لم تنظر إليه بعد»، فلا يصح أن يُحسَب قد رآه من
+ * نظر إليه. فـ`pending` هو من رآه المستكشف ولم تفتحه أنت بعد.
+ */
+async function pollNewCustomers() {
+  if (!ADMIN || !seenCustomers) return;
+  let snap;
+  try { snap = await db.collection('customers').get(); } catch { return; }
+
+  // **بلا إخبار بعد أول تشغيل:** نأخذ الموجود اليوم كخط أساس.
+  if (baselinePending) {
+    snap.forEach((d) => { seenCustomers.add(d.id); pendingCustomers.delete(d.id); });
+    baselinePending = false;
+    saveSeenCustomers();
+    refreshCustomersBadge();
+    return;
+  }
+
+  const fresh = [];
+  snap.forEach((d) => {
+    const id = d.id;
+    if (!seenCustomers.has(id) && !pendingCustomers.has(id)) fresh.push({ id, ...d.data() });
+  });
+
+  for (const c of fresh) {
+    pendingCustomers.add(c.id);
+    const who = c.name || c.phone || c.id;
+    try {
+      const ref = db.collection('activity_log').doc('customer_' + c.id);
+      const already = await ref.get();
+      if (already.exists) continue;
+      await ref.set({
+        // **اسم كاتب مختلف عن المشرف:** المستعرض يطنّش أسطر
+        // المشرف نفسه كي لا يُسمع صوت كل إجراء يفعله بيده. وهذا السطر
+        // ليس إجراء مشرف بل تسجيل زبون من التطبيق، فاسمه «التطبيق».
+        admin_name: 'التطبيق',
+        action: 'زبون جديد سجّل',
+        target: who,
+        created_at: firebase.firestore.FieldValue.serverTimestamp(),
+      });
+    } catch {}
+  }
+  if (fresh.length) saveSeenCustomers();
+  refreshCustomersBadge();
+}
+
+/** الشارة = عدد من رآه المستكشف ولم تفتح قائمتك بعد. */
+function refreshCustomersBadge() {
+  if (!pendingCustomers) return;
+  setNavBadge('customers', pendingCustomers.size);
+}
+
+/** فتح قائمة الزبائن يعني أنك رأتَهم، فيغادرون الانتظار. */
+function clearPendingCustomers() {
+  if (!pendingCustomers || !seenCustomers) return;
+  pendingCustomers.forEach((id) => seenCustomers.add(id));
+  pendingCustomers.clear();
+  saveSeenCustomers();
+  refreshCustomersBadge();
+}
+
+function startCustomerPoller() {
+  stopCustomerPoller();
+  pollNewCustomers();
+  customerPollTimer = setInterval(pollNewCustomers, 10000);
+}
+
+function stopCustomerPoller() {
+  if (customerPollTimer) { clearInterval(customerPollTimer); customerPollTimer = null; }
+}
+
 function logout() {
   ADMIN = null;
   stopActivityPoller();
   stopCallsListener();
+  stopCustomerPoller();
+  // **الخروج يخرج من Firebase Auth أيضاً:** ترك الجلسة مفتوحة يجعل
+  // الصفحة تقرأ البيانات بإذن مشرف حتى بعد أن يبدو للمستخدم أنه خرج.
+  auth.signOut().catch(() => {});
   sessionStorage.removeItem('hamada_admin');
   $('#login-screen').classList.remove('hidden');
   $('#app-screen').classList.add('hidden');
@@ -804,6 +1080,8 @@ function enterApp() {
   loadView('dashboard');
   startClock();
   startActivityPoller();
+  loadSeenCustomers();
+  startCustomerPoller();
   refreshNavBadges();
   initCallsListener();
 }
@@ -818,6 +1096,7 @@ const TITLES = {
   providers: 'أصحاب التوصيل',
   customers: 'الزبائن',
   areas: 'المناطق',
+  admins: 'المشرفون',
   activity: 'سجل النشاط',
   settings: 'الإعدادات',
 };
@@ -839,6 +1118,10 @@ async function loadView(name) {
     if (name === 'providers') await loadProviders();
     if (name === 'customers') await loadCustomers();
     if (name === 'areas') await loadAreas();
+    if (name === 'admins') await loadAdmins();
+    // **فتح قائمة الزبائن يُصفّر الشارة:** الشارة تعني «يوجد من لم تره بعد»،
+    // فبمجرد فتح القائمة رأيتهم، وإلّا بقي الرقم معلّقاً بلا معنى.
+    if (name === 'customers') clearPendingCustomers();
     if (name === 'activity') await loadActivity();
     if (name === 'settings') await loadSubSettings();
   } catch (err) {
@@ -1963,39 +2246,40 @@ function startClock() {
 
 /* ---------- Boot ---------- */
 
+/*
+ * الجلسة تُقرأ من Firebase Auth لا من `sessionStorage`:
+ *
+ * - **`sessionStorage` كان ثقة كاذبة.** حفظ المشرف فيه كان يعني أن
+ *   الصفحة تثق بمتغيّر يكتبه أي سكربت في المتصفح نفسه.
+ * - **جلسة Auth تبقى بعد إغلاق المتصفح.** فالدخول يظهر تلقائياً، وهو
+ *   ما يفعله أي منتج، والخروج الحقيقي هو `signOut`.
+ * - **بلا إنشاء تلقائي لكلمة مرور.** الكود القديم كان يكتب `admins/admin`
+ *   بكلمة مرور `admin123` إن كانت المجموعة فارغة — باب مفتوح يُفتح
+ *   وحده. حُذف، وإنشاء الحساب الأول صار عمل المالك.
+ */
 async function boot() {
-  const saved = sessionStorage.getItem('hamada_admin');
-  if (saved) {
-    try {
-      ADMIN = JSON.parse(saved);
-      if (ADMIN && ADMIN.id) {
-        const doc = await db.collection('admins').doc(ADMIN.id).get();
-        if (doc.exists) {
-          ADMIN = { id: doc.id, ...doc.data() };
-          enterApp();
-          return;
-        }
-      }
-    } catch {}
-    sessionStorage.removeItem('hamada_admin');
-  }
-
   try {
-    const snap = await db.collection('admins').limit(1).get();
-    if (snap.empty) {
-      await db.collection('admins').doc('admin').set({
-        username: 'admin',
-        password: 'admin123',
-        full_name: 'مدير النظام',
-        role: 'owner',
-      });
-      await db.collection('settings').doc('subscription_fee').set({ value: 500 });
-      await db.collection('settings').doc('payment_phone').set({ value: '+222 33 123 45 67' });
-      await db.collection('settings').doc('payment_note').set({ value: 'قم بالإرسال من خلال بنكيلي أو مصرفي أو بيم بانك أو السداد إلى' });
+    const user = auth.currentUser || (await new Promise((res) => {
+      const un = auth.onAuthStateChanged((u) => { un(); res(u); });
+    }));
+    if (user) {
+      const profile = await loadAdminProfile(user.uid);
+      if (profile) {
+        ADMIN = profile;
+        sessionStorage.setItem('hamada_admin', JSON.stringify(ADMIN));
+        enterApp();
+        return;
+      }
+      // حساب موجود بلا صلاحية: نُخرج منه حتى لا تبقى جلسة معلّقة
+      // على شاشة لا يستطيع منها فعل شيء.
+      await auth.signOut();
     }
   } catch {}
 
+  // شاشة الدخول ظاهرة افتراضياً الآن؛ نضمن ذلك فقط.
   $('#login-screen').classList.remove('hidden');
 }
+
+$('#req-btn').addEventListener('click', handleAdminRequest);
 
 boot();

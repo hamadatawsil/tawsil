@@ -1,4 +1,4 @@
-﻿<!DOCTYPE html>
+<!DOCTYPE html>
 <html lang="ar" dir="rtl">
 <head>
   <meta charset="UTF-8" />
@@ -7,8 +7,9 @@
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=Tajawal:wght@400;500;700;800;900&display=swap" rel="stylesheet" />
-  <link rel="stylesheet" href="style.css?v=20260908-7" />
+  <link rel="stylesheet" href="style.css?v=20261005-1" />
   <script src="https://www.gstatic.com/firebasejs/10.14.1/firebase-app-compat.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/10.14.1/firebase-auth-compat.js"></script>
   <script src="https://www.gstatic.com/firebasejs/10.14.1/firebase-firestore-compat.js"></script>
   <script>
     firebase.initializeApp({
@@ -33,6 +34,23 @@
       <input id="login-password" type="password" placeholder="••••••••" required />
       <button type="submit" class="btn-primary" id="login-btn">دخول</button>
       <p id="login-error" class="error-text hidden"></p>
+      <p id="login-notadmin" class="error-text hidden">
+        الحساب صحيح لكنه ليس مشرفاً. إن كنت موظفاً جديداً اطلب الصلاحية بالأسفل ثم انتظر موافقة المدير.
+      </p>
+      <details class="login-extra">
+        <summary>طلب صلاحية مشرف</summary>
+        <p class="login-sub">أنشئ حسابك هنا واطلب أن يعتمده مدير اللوحة.</p>
+        <label>الاسم</label>
+        <input id="req-name" type="text" placeholder="الاسم الكامل" />
+        <label>البريد الإلكتروني</label>
+        <input id="req-email" type="email" placeholder="name@example.com" />
+        <label>كلمة المرور</label>
+        <input id="req-password" type="password" placeholder="••••••••" />
+        <label>تأكيد كلمة المرور</label>
+        <input id="req-password2" type="password" placeholder="••••••••" />
+        <button type="button" class="btn-ghost" id="req-btn">إرسال الطلب</button>
+        <p id="req-msg" class="error-text hidden"></p>
+      </details>
     </form>
   </div>
 
@@ -49,8 +67,9 @@
         <button class="nav-item" data-view="orders">الطلبات<span class="nav-badge hidden" data-badge="orders">0</span></button>
         <button class="nav-item" data-view="calls">المكالمات<span class="nav-badge hidden" data-badge="calls">0</span></button>
         <button class="nav-item" data-view="providers">أصحاب التوصيل</button>
-        <button class="nav-item" data-view="customers">الزبائن</button>
+        <button class="nav-item" data-view="customers">الزبائن<span class="nav-badge hidden" data-badge="customers">0</span></button>
         <button class="nav-item" data-view="areas">المناطق</button>
+        <button class="nav-item" data-view="admins">المشرفون<span class="nav-badge hidden" data-badge="admins">0</span></button>
         <button class="nav-item" data-view="activity">سجل النشاط</button>
         <button class="nav-item" data-view="settings">الإعدادات</button>
       </nav>
@@ -208,6 +227,37 @@
         </div>
       </section>
 
+      <section id="view-admins" class="view">
+        <div class="filter-bar">
+          <h3 class="section-title">المشرفون وطلبات الصلاحية</h3>
+          <button class="btn-ghost" data-reload="admins">تحديث</button>
+        </div>
+        <div class="card">
+          <p class="login-sub" style="margin-top:0">
+            الموظف الجديد يضغط «طلب صلاحية مشرف» في شاشة الدخول فيُنشئ حسابه ويظهر طلبه هنا، ثم تقبله فيصير مشرفاً.
+            لا يمكن لأي شخص أن يصبح مشرفاً من تلقاء نفسه.
+          </p>
+        </div>
+        <div class="table-card">
+          <h3 class="section-title">طلبات بانتظار القبول</h3>
+          <table>
+            <thead>
+              <tr><th>الاسم</th><th>البريد</th><th>تاريخ الطلب</th><th>إجراءات</th></tr>
+            </thead>
+            <tbody id="adminreq-body"></tbody>
+          </table>
+        </div>
+        <div class="table-card">
+          <h3 class="section-title">المشرفون الحاليون</h3>
+          <table>
+            <thead>
+              <tr><th>الاسم</th><th>البريد</th><th>الدور</th><th>منذ</th><th>إجراءات</th></tr>
+            </thead>
+            <tbody id="admins-body"></tbody>
+          </table>
+        </div>
+      </section>
+
       <section id="view-activity" class="view">
         <div class="filter-bar">
           <h3 class="section-title">سجل النشاط</h3>
@@ -250,6 +300,6 @@
   <div id="modal-root"></div>
   <div id="toast" class="toast hidden"></div>
   <script src="https://download.agora.io/sdk/release/AgoraRTC_N-4.22.2.js"></script>
-  <script src="app.js?v=20260908-7"></script>
+  <script src="app.js?v=20261005-1"></script>
 </body>
 </html>
