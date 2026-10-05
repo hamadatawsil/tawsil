@@ -13,7 +13,7 @@ const AGORA_APP_CERT = '4f051a05587648238e6d208198db110f';
 const CALL_ADMIN_ID = 'admin';
 const CALL_ADMIN_UID = 2;
 const RING_TIMEOUT_MS = 60000;
-const RUN_SHA = 'v20261005-2';
+const RUN_SHA = 'v20261005-3';
 
 try { console.log('[app] built:', RUN_SHA, '| AgoraRTC version:', (typeof AgoraRTC !== 'undefined' ? AgoraRTC.VERSION : 'غير محمّل')); } catch (_) {}
 
@@ -778,8 +778,42 @@ async function loadCalls() {
 /** خرائط اسم المستخدم إلى بريد Auth، فيبقى الحقلان كما هما في الشاشة. */
 const AUTH_EMAIL_BY_USERNAME = { admin: 'admin@tawsil.app' };
 
+/*
+ * تنظيف اسم المستخدم قبل استعماله.
+ *
+ * **المشكلة التي وقعت:** كُتب `admin` على لوح المفاتيح العربي فيدخل معه
+ * تشكيل — `َadmin` — فيرفضه الكود رغم أنه مكتوب صحيحاً للرجل. و`trim()`
+ * لا تنفع: التشكيل ليس فراغاً، فهو حرف من نوع `Mn` ملتصق بالاسم، فيبقى
+ * بعد التنظيف ويُخالف `admin` حرفاً حرفاً.
+ *
+ * **وقبل التنظيف كان الفشل مُهماً:** الرسالة كانت «اسم المستخدم غير
+ * معروف»، وهي صحيحة تماماً لكنها لا تدل على أن الاسم الذي يكتبه أمامي
+ * ليس هو الاسم الذي كتبه. فلا بدّ من أن يقول الاسم منطوقاً ومكتوباً معاً.
+ */
+const DIACRITIC_RE = /[\u0610-\u061A\u064B-\u065F\u0670\u06D6-\u06ED\u0640\uFE70-\uFEFF]/g;
+const INVISIBLE_RE = /[\u200B-\u200F\uFEFF\u00AD]/g;
+
+function cleanUsername(raw) {
+  return String(raw == null ? '' : raw)
+    .replace(INVISIBLE_RE, '')
+    .replace(DIACRITIC_RE, '')
+    .trim()
+    .toLowerCase();
+}
+
 function authEmailFor(username) {
-  return AUTH_EMAIL_BY_USERNAME[username] || (username.indexOf('@') > -1 ? username : '');
+  const u = cleanUsername(username);
+  if (!u) return '';
+  // **بريد مكتوب مباشرة:** نقبله كما هو بعد التنظيف، فهو مفاتيح Firebase.
+  if (u.indexOf('@') > -1) return u;
+  return AUTH_EMAIL_BY_USERNAME[u] || '';
+}
+
+/** يعرض الاسم كما وصل، ليعرف المستخدم الفرق بين ما كتبه وما قُبل. */
+function sayLoginError(text, typed) {
+  const el = $('#login-error');
+  el.textContent = text + (typed ? ' (المكتوب: ' + typed + ')' : '');
+  el.classList.remove('hidden');
 }
 
 /** يقرأ ملف المشرف ويعيده، أو null إن لم يكن مشرفاً. */
@@ -791,14 +825,16 @@ async function loadAdminProfile(uid) {
 
 async function handleLogin(e) {
   e.preventDefault();
-  const username = $('#login-username').value.trim();
+  // **نحتفظ بالاسم خاماً ونستعمل المنقّى:** الاسم المنقّى هو الذي يُبحث
+  // به، والخام هو الذي يُعرض في الرسالة إن فشل البحث، فالمستخدم يرى
+  // الفرق بدل أن يُقال له «اسم غير معروف» وكأنه كتب خطأً.
+  const typed = $('#login-username').value;
   const password = $('#login-password').value;
-  const email = authEmailFor(username);
+  const email = authEmailFor(typed);
   $('#login-error').classList.add('hidden');
   $('#login-notadmin').classList.add('hidden');
   if (!email) {
-    $('#login-error').textContent = 'اسم المستخدم غير معروف. أدخّل "admin" أو بريدك.';
-    $('#login-error').classList.remove('hidden');
+    sayLoginError('اسم المستخدم غير معروف. أدخّل "admin" أو بريدك.', cleanUsername(typed));
     return;
   }
   $('#login-btn').textContent = 'جاري الدخول...';
