@@ -13,7 +13,7 @@ const AGORA_APP_CERT = '4f051a05587648238e6d208198db110f';
 const CALL_ADMIN_ID = 'admin';
 const CALL_ADMIN_UID = 2;
 const RING_TIMEOUT_MS = 60000;
-const RUN_SHA = 'v20261005-1';
+const RUN_SHA = 'v20261005-2';
 
 try { console.log('[app] built:', RUN_SHA, '| AgoraRTC version:', (typeof AgoraRTC !== 'undefined' ? AgoraRTC.VERSION : 'غير محمّل')); } catch (_) {}
 
@@ -823,7 +823,12 @@ async function handleLogin(e) {
       'auth/too-many-requests': 'محاولات كثيرة من هذا الجهاز. انتظر قليلاً ثم أعد المحاولة',
       'auth/network-request-failed': 'تعذّر الاتصال بالإنترنت',
     };
-    $('#login-error').textContent = map[err.code] || 'تعذّر الدخول: ' + err.message;
+    // **الرمز يبقى ظاهراً عمداً:** الرسالة العربية وحدها لا تكفي
+    // لتشخيص فشل في المتصفح، فالرمز يحدّد السبب بالضبط («النطاق غير
+    // مسموح» يختلف كلياً عن «كلمة مرور خاطئة»). إخفاءه يجعل كل عطل
+    // يبدو واحداً، والتشخيص يمتد بلا نهاية.
+    const known = map[err.code];
+    $('#login-error').textContent = (known || 'تعذّر الدخول: ' + err.message) + ' [' + (err.code || '؟') + ']';
     $('#login-error').classList.remove('hidden');
   } finally {
     $('#login-btn').textContent = 'دخول';
