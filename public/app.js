@@ -1777,7 +1777,12 @@ async function reviewDriverRequest(id, action) {
         batch.set(db.collection('driver_login_index').doc(id), {
           passwordHash: hash,
         });
-        batch.set(ref, {
+        // **`update` لا `set`:** الطلب مستند فيه `name` و`phone` و
+        // `passwordHash` و`createdAt`. و`set` بلا `merge` يستبدل المستند
+        // كاملاً فيمحو الاسم والبصمة وتاريخ التقديم، فيصبح القبول بلا
+        // أثر يُراجَع ولا يستطيع المشرف قراءة ما قبله. الحقول الأربعة
+        // تُقرأ من `data` هنا ولا داعي لكتابتها أصلاً.
+        batch.update(ref, {
           status: 'approved',
           review_note: '',
           reviewed_by: ADMIN.full_name,
@@ -1811,9 +1816,19 @@ function deleteDriverRequest(id) {
       'مع صور وثائقه الأربع نهائياً.<br>لا يمكن التراجع، ولا يستطيع صاحب التوصيل إعادة الطلب بنفس الرقم بعدها.',
     async () => {
       try {
-        await db.collection('driver_applications').doc(id).delete();
+        // **حذف الرأس لا يحذف صور الوثائق:** Firestore لا يُزيل
+        // المجموعات الفرعية عند حذف المستند الأب. حذف الرأس وحده يترك
+        // أربع صور base64 يتيمة: نحو 3.2 ميغابايت لكل طلب محذوف، مع
+        // تكلفة قراءة على كل من يعدّ المستند لاحقاً، وتبقى قابلة للعودة
+        // لو أُعيد فتح الحساب. فكل كتابة تُجمَع في `batch` واحدة.
+        const ref = db.collection('driver_applications').doc(id);
+        const docs = await ref.collection('documents').get();
+        const batch = db.batch();
+        docs.docs.forEach((d) => batch.delete(d.ref));
+        batch.delete(ref);
+        await batch.commit();
         await logActivity('حذف طلب تسجيل صاحب توصيل', name);
-        toast('تم حذف الطلب');
+        toast('تم حذف الطلب' + (docs.size ? ' وصوره' : ''));
         if (driverDocsCache && driverDocsCache.id === id) driverDocsCache = null;
         refreshNavBadges();
         loadDriverRequests();
