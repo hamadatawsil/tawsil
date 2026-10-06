@@ -6,6 +6,7 @@ let ADMIN = null;
 let ordersState = [];
 let providersState = [];
 let customersState = [];
+let driverReqState = [];
 
 /* ---------- إعدادات المكالمات (Agora) ---------- */
 const AGORA_APP_ID = '9f539745893d4bbb86741430ab9137db';
@@ -13,7 +14,7 @@ const AGORA_APP_CERT = '4f051a05587648238e6d208198db110f';
 const CALL_ADMIN_ID = 'admin';
 const CALL_ADMIN_UID = 2;
 const RING_TIMEOUT_MS = 60000;
-const RUN_SHA = 'v20261005-3';
+const RUN_SHA = 'v20261006-1';
 
 try { console.log('[app] built:', RUN_SHA, '| AgoraRTC version:', (typeof AgoraRTC !== 'undefined' ? AgoraRTC.VERSION : 'غير محمّل')); } catch (_) {}
 
@@ -271,15 +272,22 @@ async function refreshNavBadges() {
     const pendingRef = db.collection('subscription_requests').where('status', '==', 'pending');
     const resubRef = db.collection('subscription_requests').where('status', '==', 'needs_resubmission');
     const newOrdersRef = db.collection('orders').where('status', '==', 'new');
-    const [pending, resub, newOrders] = await Promise.all([
+    const pendingDriversRef = db.collection('driver_applications').where('status', '==', 'pending');
+    const [pending, resub, newOrders, pendingDrivers] = await Promise.all([
       pendingRef.count().get(),
       resubRef.count().get(),
       newOrdersRef.count().get(),
+      pendingDriversRef.count().get(),
     ]);
     setNavBadge('requests', pending.data().count + resub.data().count);
     setNavBadge('orders', newOrders.data().count);
+    // **شارة السائقين مستقلّة لا مدمجة مع شارة الاشتراك:** هما قائمتان
+    // مختلفتان بمراجعة مختلفة. ودمجهما يجعل عدّاداً يخفي تحته طلبات
+    // تسجيل سائقين لا يعرف المشرف أنّها وصلت أصلاً.
+    setNavBadge('driverRequests', pendingDrivers.data().count);
     setSegCount('requests-pending', pending.data().count);
     setSegCount('orders-new', newOrders.data().count);
+    setSegCount('driverreq-pending', pendingDrivers.data().count);
   } catch {}
 }
 
@@ -1132,6 +1140,7 @@ function enterApp() {
 const TITLES = {
   dashboard: 'لوحة الإحصائيات',
   requests: 'طلبات الاشتراك',
+  driverRequests: 'تسجيل أصحاب التوصيل',
   orders: 'الطلبات',
   calls: 'المكالمات',
   providers: 'أصحاب التوصيل',
@@ -1154,6 +1163,7 @@ async function loadView(name) {
   try {
     if (name === 'dashboard') await loadDashboard();
     if (name === 'requests') await loadRequests();
+    if (name === 'driverRequests') await loadDriverRequests();
     if (name === 'orders') await loadOrders();
     if (name === 'calls') await loadCalls();
     if (name === 'providers') await loadProviders();
@@ -1551,6 +1561,266 @@ async function saveReviewDocs(btn) {
     loadRequests();
     if (requestsFilter === 'pending' || !requestsFilter) loadView('dashboard');
   } catch (err) { btn.disabled = false; toast(err.message, true); }
+}
+
+/* ---------- طلبات تسجيل أصحاب التوصيل ---------- */
+
+/*
+ * **هذه القائمة غير قابلة للمراجعة نظرياً:** التطبيق يفرض أربع وثائق
+ * قبل الإرسال، والقواعد تفرضها قبل الكتابة، فالطلب الذي يصل هنا مضمون
+ * أن له أربع صور. ومَن يشترط الفحص هنا برمجياً يضيف فخّاً لنفسه: يوم
+ * تُضاف وثيقة خامسة يبقى الفحص القديم سليماً ويقبل طلباً ناقصاً.
+ */
+
+const DRIVER_DOC_IDS = ['id_card', 'personal_photo', 'grey_card', 'driving_license'];
+
+const DRIVER_DOC_LABELS = {
+  id_card: 'بطاقة التعريف',
+  personal_photo: 'الصورة الشخصية',
+  grey_card: 'البطاقة الرمادية',
+  driving_license: 'رخصة السياقة',
+};
+
+const DRIVER_STATUS_LABELS = {
+  pending: 'قيد المراجعة',
+  approved: 'مقبول',
+  rejected: 'مرفوض',
+};
+
+let driverReqFilter = '';
+
+async function loadDriverRequests() {
+  // **بلا `orderBy` على `createdAt`:** الحقل يُكتب بـ`serverTimestamp` من
+  // التطبيق، و`orderBy` على حقل طابع زمني يُنتج استعلاماً مُركّباً
+  // (composite) لا تحتاجه لوحة بصف واحد. والأحدث أولاً هنا أقل أهمية من
+  // صحّة النتائج: الفرز يتمّ في المتصفّح على القيمة المحسوبة.
+  const snap = await db.collection('driver_applications').get();
+  let rows = snap.docs.map(d => ({ id: d.id, ...d.data() }));
+  // **الفرز بعد الجلب لا قبله:** الطابع الزمني يُسخَّن محلياً بعد قراءة
+  // المستند، فيصير رقماً يمكن المقارنة به بدل كائن `Timestamp`.
+  rows.sort((a, b) => millisOf(b.createdAt) - millisOf(a.createdAt));
+  if (driverReqFilter) rows = rows.filter(r => r.status === driverReqFilter);
+  driverReqState = rows;
+
+  const body = $('#driverreq-body');
+  if (!driverReqState.length) {
+    body.innerHTML = '<tr class="empty-row"><td colspan="6">لا توجد طلبات تسجيل</td></tr>';
+    return;
+  }
+  body.innerHTML = driverReqState
+    .map((r) => {
+      const st = r.status || 'pending';
+      const badge = '<span class="badge ' + esc(st) + '">' +
+        esc(DRIVER_STATUS_LABELS[st] || st) + '</span>';
+      const note = r.review_note ? '<div class="req-note">' + esc(r.review_note) + '</div>' : '';
+      let actions = '<div class="row-actions">';
+      // **الأزرار تظهر للقيد فقط:** طلب مقبول أو مرفوض لا يُراجَع مرّة
+      // ثانية من هنا، فإعادة فتحه تعني إقراراً غير مسجّل على منافس
+      // محتمل. وما قبله يُحذف صراحةً إن أراد المشرف تغيير رأيه.
+      if (st === 'pending') {
+        actions +=
+          '<button class="btn-sm blue" onclick="openDriverReview(\'' + esc(r.id) + '\')">مراجعة الوثائق</button>' +
+          '<button class="btn-sm ok" onclick="reviewDriverRequest(\'' + esc(r.id) + '\',\'approve\')">قبول</button>' +
+          '<button class="btn-sm no" onclick="reviewDriverRequest(\'' + esc(r.id) + '\',\'reject\')">رفض</button>';
+      }
+      actions += '<button class="btn-sm no" onclick="deleteDriverRequest(\'' + esc(r.id) + '\')">حذف</button></div>';
+      return (
+        '<tr>' +
+        '<td style="font-size:11px;max-width:90px;overflow:hidden;text-overflow:ellipsis" title="' + esc(r.id) + '">' +
+          esc(r.id.substring(0, 10)) + '</td>' +
+        '<td><strong>' + esc(r.name) + '</strong></td>' +
+        '<td style="direction:ltr;text-align:right">' + esc(r.phone) + '</td>' +
+        '<td><span class="doc-chip">' + DRIVER_DOC_IDS.length + ' وثائق</span></td>' +
+        '<td>' + fmtDate(r.createdAt) + '</td>' +
+        '<td>' + badge + note + '</td>' +
+        '<td>' + actions + '</td>' +
+        '</tr>'
+      );
+    })
+    .join('');
+}
+
+/* **`millisOf` لأن `createdAt` قد يكون `Timestamp` أو `null`:**
+ * الطلب الجديد طابعه محسوم من الخادم، لكن طلباً قديماً كُتب قبل
+ * إضافة `createdAt` إلى الخدمة يبقى بلا قيمة. و`null - number` في
+ * JavaScript لا يرمي بل يعطي `NaN`، و`sort` بمقارنة تُرجع `NaN` يترك
+ * الترتيب كما جاء بلا تغيير. فنُرجع 0 لا `NaN`.
+ */
+function millisOf(value) {
+  if (!value) return 0;
+  if (typeof value.toMillis === 'function') return value.toMillis();
+  if (typeof value.seconds === 'number') return value.seconds * 1000;
+  const parsed = new Date(value).getTime();
+  return Number.isFinite(parsed) ? parsed : 0;
+}
+
+/* ---------- مراجعة وثائق السائق ---------- */
+
+/* **الكاش يمنع إعادة الجلب عند فتح طلب ثانٍ:** الصور base64 ثقيلة
+ * (نحو 800 كيلوبايت لكل واحدة)، وبلا كاش تفتح طلبين فتفتح أربع صور
+ * مرّة أخرى من الشبكة. والمفتاح رقم الهاتف نفسه: طلب واحد لكل رقم.
+ */
+let driverDocsCache = null;
+
+async function fetchDriverDocuments(id) {
+  if (driverDocsCache && driverDocsCache.id === id) return driverDocsCache.docs;
+  const snap = await db.collection('driver_applications').doc(id).collection('documents').get();
+  const byId = {};
+  snap.docs.forEach((d) => { byId[d.id] = d.data(); });
+  const docs = DRIVER_DOC_IDS.map((key) => ({ key: key, label: DRIVER_DOC_LABELS[key], data: byId[key] && byId[key].data }));
+  driverDocsCache = { id: id, docs: docs };
+  return docs;
+}
+
+function openDriverReview(id) {
+  const r = driverReqState.find((x) => x.id === id);
+  const name = r ? esc(r.name) : id;
+  openModal({
+    title: 'مراجعة وثائق: ' + name,
+    body: '<div class="rv-body" id="drv-body"><div class="rv-empty">جارٍ تحميل الوثائق...</div></div>',
+    foot: '<button class="modal-btn ghost" onclick="this.closest(\'.doc-lightbox\').remove()">إغلاق</button>',
+  });
+  fetchDriverDocuments(id)
+    .then((docs) => {
+      const host = document.getElementById('drv-body');
+      // **الحارس يمنع الكتابة على عنصر رحل:** الفتح أخذ زمن الشبكة، فقد
+      // يُغلق المشرف النافذة أو يفتح طلباً آخر قبل وصول الصور. والكتابة
+      // على عنصر لم يعد في الصفحة تُنشئ العنصر من جديد في مكان غريب.
+      if (!host) return;
+      host.innerHTML = docs
+        .map((d) => {
+          const img = d.data
+            ? '<img class="rv-img" src="data:image/jpeg;base64,' + esc(d.data) + '" onclick="openDocImage(this.src, \'' + d.label + '\')">'
+            : '<div class="rv-empty">لا صورة</div>';
+          return (
+            '<div class="rv-item">' +
+            '<div class="rv-imgbox">' + img + '</div>' +
+            '<div class="rv-meta"><strong>' + d.label + '</strong></div>' +
+            '</div>'
+          );
+        })
+        .join('');
+    })
+    .catch((err) => {
+      const host = document.getElementById('drv-body');
+      if (!host) return;
+      host.innerHTML = '<div class="rv-empty">تعذّر تحميل الوثائق: ' + esc(err.message) + '</div>';
+    });
+}
+
+/**
+ * يقبل أو يرفض طلب تسجيل، والقبول يُنشئ حساب السائق.
+ *
+ * **والقبول عملية واحدة في `batch` لا ثلاث عمليات متتابعة:**
+ * نكتب `driver_accounts` و`driver_login_index` و`status` معاً. فلو
+ * نجحت الأولى وفشلت الثانية لبقي في Firestore حساب سائق لا يستطيع
+ * الدخول (لا فهرس له) بينما الطلب ما زال «قيد المراجعة» في الجدول —
+ * حالة لا يعرفها أحد ولا يصلحها أحد. و`batch` يجعلها إما أن تَتمّ أو لا.
+ *
+ * **والصور لا تُحذف بعد القبول:** نُبقيها كسجلّ مراجعة. لو حذفناها
+ * فالقبول صار قراراً بلا دليل، وأيّ شكّ لاحق في الوثائق لا يجد ما يرجع
+ * إليه. والطلب نفسه يحمل `reviewed_by` و`reviewed_at`.
+ */
+async function reviewDriverRequest(id, action) {
+  const r = driverReqState.find((x) => x.id === id);
+  const label = r ? r.name : id;
+
+  if (action === 'reject') {
+    askText(
+      'رفض طلب التسجيل',
+      'سبب الرفض (يظهر لصاحب التوصيل عند طلبه من جديد)',
+      async (note) => {
+        try {
+          await db.collection('driver_applications').doc(id).update({
+            status: 'rejected',
+            review_note: note || '',
+            reviewed_by: ADMIN.full_name,
+            reviewed_at: firebase.firestore.FieldValue.serverTimestamp(),
+          });
+          await logActivity('رفض تسجيل صاحب توصيل', label);
+          toast('تم رفض الطلب');
+          refreshNavBadges();
+          loadDriverRequests();
+        } catch (err) { toast(err.message, true); }
+      },
+      { required: true, confirm: 'رفض' }
+    );
+    return;
+  }
+
+  askConfirm(
+    'قبول طلب التسجيل',
+    'سيُنشأ حساب لصاحب التوصيل "<strong>' + esc(label) + '</strong>" بكلمة المرور التي اختارها، ' +
+      'ويستطيع الدخول بعدها مباشرة. هل تريد القبول؟',
+    async () => {
+      try {
+        const ref = db.collection('driver_applications').doc(id);
+        const snap = await ref.get();
+        const data = snap.data() || {};
+        const hash = data.passwordHash;
+        // **لا قبول بلا بصمة:** الحساب يُنشأ من `passwordHash` المحفوظ في
+        // الطلب، فإن غاب الحقل لا حساب يُنشأ ولا يدخل أحد. والكتابة
+        // حساباً ببصمة فارغة كان سيعني حساباً يُفتح بكلمة مرور أيّها.
+        if (typeof hash !== 'string' || hash.length !== 64) {
+          toast('لا توجد كلمة مرور مخزَّنة لهذا الطلب، لا يمكن القبول', true);
+          return;
+        }
+        const now = firebase.firestore.FieldValue.serverTimestamp();
+        const batch = db.batch();
+        batch.set(db.collection('driver_accounts').doc(id), {
+          phone: data.phone || id,
+          name: data.name || '',
+          passwordHash: hash,
+          status: 'active',
+          createdAt: now,
+        });
+        batch.set(db.collection('driver_login_index').doc(id), {
+          passwordHash: hash,
+        });
+        batch.set(ref, {
+          status: 'approved',
+          review_note: '',
+          reviewed_by: ADMIN.full_name,
+          reviewed_at: now,
+        });
+        await batch.commit();
+        await logActivity('قبول تسجيل صاحب توصيل', label);
+        toast('تم القبول وأُنشئ الحساب');
+        refreshNavBadges();
+        loadDriverRequests();
+      } catch (err) { toast(err.message, true); }
+    },
+    { confirm: 'قبول' }
+  );
+}
+
+/**
+ * يحذف طلب تسجيل وصوره نهائياً.
+ *
+ * **والحذف يقتظر قراراً لا دعوة للتراجع:** القواعد تمنع التطبيق من
+ * التعديل أو الحذف (وإلا استُبدل طلب معلّق بمحتوى لم يره المشرف)، فالحذف
+ * قرار المشرف وحده. ولا يُحذف طلب إلا في حالتين: طلبٌ مرفوض ثم أراد
+ * صاحب التوصيل إعادة التقديم بنفس الرقم، أو طلب تجريبي.
+ */
+function deleteDriverRequest(id) {
+  const r = driverReqState.find((x) => x.id === id);
+  const name = r ? r.name : id;
+  askConfirm(
+    'حذف طلب التسجيل',
+    'سيُحذف طلب "<strong>' + esc(name) + '</strong>"' +
+      'مع صور وثائقه الأربع نهائياً.<br>لا يمكن التراجع، ولا يستطيع صاحب التوصيل إعادة الطلب بنفس الرقم بعدها.',
+    async () => {
+      try {
+        await db.collection('driver_applications').doc(id).delete();
+        await logActivity('حذف طلب تسجيل صاحب توصيل', name);
+        toast('تم حذف الطلب');
+        if (driverDocsCache && driverDocsCache.id === id) driverDocsCache = null;
+        refreshNavBadges();
+        loadDriverRequests();
+      } catch (err) { toast(err.message, true); }
+    },
+    { danger: true, confirm: 'حذف' }
+  );
 }
 
 /* ---------- Orders ---------- */
@@ -2267,6 +2537,15 @@ document.querySelectorAll('#orders-seg .seg-btn').forEach((b) =>
     b.classList.add('active');
     ordersFilter = b.dataset.status;
     loadOrders();
+  })
+);
+
+document.querySelectorAll('#driverreq-seg .seg-btn').forEach((b) =>
+  b.addEventListener('click', () => {
+    document.querySelectorAll('#driverreq-seg .seg-btn').forEach((x) => x.classList.remove('active'));
+    b.classList.add('active');
+    driverReqFilter = b.dataset.status;
+    loadDriverRequests();
   })
 );
 
