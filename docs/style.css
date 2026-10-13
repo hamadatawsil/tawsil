@@ -431,6 +431,7 @@ tbody tr:hover { background: #fafcfa; }
 .badge.en_route { background: #eee9fb; color: #5b3ac7; }
 .badge.completed, .badge.approved { background: var(--primary-light); color: var(--primary); }
 .badge.rejected { background: var(--danger-light); color: var(--danger); }
+.badge.banned { background: #7f1d1d; color: #fff; }
 .badge.pending { background: #fff8e1; color: #9a7a1a; }
 .badge.needs_resubmission { background: #fff4e0; color: #b9760a; }
 .badge.online { background: var(--primary-light); color: var(--primary); }

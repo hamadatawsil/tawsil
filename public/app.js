@@ -1585,6 +1585,7 @@ const DRIVER_STATUS_LABELS = {
   pending: 'قيد المراجعة',
   approved: 'مقبول',
   rejected: 'مرفوض',
+  banned: 'مطرود',
 };
 
 /* **النصّ الافتراضي للإنذار من شروط التسجيل نفسها:** المشرف غالباً يرسل
@@ -1598,8 +1599,13 @@ const DRIVER_WARNING_DEFAULT =
 let driverReqFilter = '';
 
 /* **إنذارات أصحاب التوصيل بمفتاح الرقم:** تُقرأ مع الطلبات لتُعرض حالة
- * الإنذار في العمود نفسه: قائمٌ (لم يُطّلع عليه) أو مُطّلعٌ عليه. */
+ * الإنذار في العمود نفسه: قائمٌ (لم يُطّلع عليه) أو مُطّلعٌ عليه. ويحمل
+ * المستند `count` عدد الإنذارات كلها، فيرى المشرف كم أخطأ صاحب التوصيل. */
 let driverWarningsMap = {};
+
+/* **المطرودون مجموعة أرقام:** تُقرأ مع الطلبات لتُعرض حالة الطرد ومنع
+ * أزرار الإنذار والطرد على من طُرد سابقاً. */
+let driverBannedSet = new Set();
 
 /* **فشل قراءة الإنذارات لا يُسقط جدول الطلبات:** لو لم تُنشر قواعد
  * `driver_warnings` بعد، أو تعذّرت الشبكة، يُعرض الجدول بلا علامة إنذار
@@ -1615,6 +1621,17 @@ async function loadDriverWarnings() {
   }
 }
 
+/* **وقراءة المطرودين لا تُسقط الجدول كذلك:** القاعدة نفسها: علامةٌ غائبة
+ * تعني «لا حظر معروف»، فلا يُمنع مشرفٌ من العمل لأن قائمةً لم تُقرأ. */
+async function loadBannedDrivers() {
+  try {
+    const snap = await db.collection('banned_drivers').get();
+    return new Set(snap.docs.map((d) => d.id));
+  } catch (err) {
+    return new Set();
+  }
+}
+
 async function loadDriverRequests() {
   // **بلا `orderBy` على `createdAt`:** الحقل يُكتب بـ`serverTimestamp` من
   // التطبيق، و`orderBy` على حقل طابع زمني يُنتج استعلاماً مُركّباً
@@ -1622,6 +1639,7 @@ async function loadDriverRequests() {
   // صحّة النتائج: الفرز يتمّ في المتصفّح على القيمة المحسوبة.
   const snap = await db.collection('driver_applications').get();
   driverWarningsMap = await loadDriverWarnings();
+  driverBannedSet = await loadBannedDrivers();
   let rows = snap.docs.map(d => ({ id: d.id, ...d.data() }));
   // **الفرز بعد الجلب لا قبله:** الطابع الزمني يُسخَّن محلياً بعد قراءة
   // المستند، فيصير رقماً يمكن المقارنة به بدل كائن `Timestamp`.
@@ -1640,14 +1658,16 @@ async function loadDriverRequests() {
       const badge = '<span class="badge ' + esc(st) + '">' +
         esc(DRIVER_STATUS_LABELS[st] || st) + '</span>';
       const note = r.review_note ? '<div class="req-note">' + esc(r.review_note) + '</div>' : '';
-      // **علامة الإنذار للمقبول وحده:** من لم يُقبل بعد لا حساب له في
-      // الشاشة، فالإنذار قبل القبول بلا معنًى. والعلامة تكشف ما لا يكشفه
-      // النصّ: هل اطّلع صاحب التوصيل على الإنذار أم ما زال قائماً.
+      // **العدّاد يكشف ما لا يكشفه النصّ:** إنذارٌ واحد أو اثنان أو ثلاثة
+      // قرار المشرف مرجعه عدد الأخطاء لا وجود الخطأ. والعلامة قابلة
+      // للنقر فتُفتح سجلّ الإنذارات كلها بنصّها وتاريخها.
       const warn = driverWarningsMap[r.id];
-      const warnChip = (st === 'approved' && warn)
-        ? (warn.acknowledged
-            ? '<span class="badge approved">اطّلع على الإنذار</span>'
-            : '<span class="badge rejected">إنذار قائم</span>')
+      const warnCount = warn ? (Number(warn.count) || 1) : 0;
+      const banned = driverBannedSet.has(r.id);
+      const warnChip = (!banned && warnCount > 0)
+        ? '<span class="badge ' + (warn.acknowledged ? 'approved' : 'rejected') +
+            '" style="cursor:pointer" title="عرض سجلّ الإنذارات" ' +
+            'onclick="openDriverWarningHistory(\'' + esc(r.id) + '\')">إنذارات: ' + warnCount + '</span>'
         : '';
       let actions = '<div class="row-actions">';
       // **الأزرار تظهر للقيد فقط:** طلب مقبول أو مرفوض لا يُراجَع مرّة
@@ -1659,13 +1679,13 @@ async function loadDriverRequests() {
           '<button class="btn-sm ok" onclick="reviewDriverRequest(\'' + esc(r.id) + '\',\'approve\')">قبول</button>' +
           '<button class="btn-sm no" onclick="reviewDriverRequest(\'' + esc(r.id) + '\',\'reject\')">رفض</button>';
       }
-      // **زرّ الإنذار للمقبول وحده:** الإنذار وسيلة ضبط حسابٍ قائم،
-      // ومن ليس له حساب بعد لا يُنذَر. والملفّ يلمس مفتاح الرقم وحده،
-      // فلا تُحمل الاسم في `onclick` (فيه محارف تُفسد السطر) بل يُقرأ من
-      // الحالة هنا كما يفعل `reviewDriverRequest`.
-      if (st === 'approved') {
-        actions += '<button class="btn-sm blue" onclick="openDriverWarning(\'' + esc(r.id) + '\')">' +
-          (warn ? 'إنذار جديد' : 'إنذار') + '</button>';
+      // **الإنذار والطرد للمقبول وحده:** هما وسيلتا ضبط حسابٍ قائم، ومن
+      // ليس له حساب بعد لا يُنذَر ولا يُطرَد. والمعرّف وحده يُحمل في
+      // `onclick` (الاسم فيه محارف تُفسد السطر)، ويُقرأ من الحالة هنا.
+      if (st === 'approved' && !banned) {
+        actions +=
+          '<button class="btn-sm blue" onclick="openDriverWarning(\'' + esc(r.id) + '\')">إنذار</button>' +
+          '<button class="btn-sm no" onclick="expelDriver(\'' + esc(r.id) + '\')">طرد وإغلاق الحساب</button>';
       }
       actions += '<button class="btn-sm no" onclick="deleteDriverRequest(\'' + esc(r.id) + '\')">حذف</button></div>';
       return (
@@ -1889,9 +1909,13 @@ function deleteDriverRequest(id) {
  * المجموعة، والقواعد تسمح للتطبيق بقراءة مستندٍ واحد بمعرّفه كما فهرس
  * الدخول. ولهذا المعرّف رقم لا معرّف عشوائي.
  *
- * **و`set` بلا دمج يصفّر الاطّلاع:** إنذارٌ جديد لنفس الرقم يجب أن يعود
- * قائماً. ولو دُمج لبقي `acknowledged: true` من إنذار سابق فظهر الجديد
- * وهو مخفيّ — إنذارٌ لا يراه أحد.
+ * **و`set` بدمج يصفّر الاطّلاع ويُبقي العدّاد:** `acknowledged: false`
+ * يُكتب صراحةً فيعود الإنذار قائماً بعد كل إرسال، و`count` يزيد واحداً
+ * بـ`increment` فلا يُمحى عدد الإنذارات السابقة. والمعرّف الرقمي نفسه
+ * يعني أن إنذاراً جديداً يُحدّث المستند لا ينشئ ثانياً.
+ *
+ * **وكل إنذار يُسجّل مستنداً في سجلّ `history`:** فالعدّاد يقول «كم»،
+ * والسجلّ يقول «ماذا ومتى ومن». وبهما يقرّر المشرف: إنذار ثانٍ أم طرد.
  */
 function openDriverWarning(id) {
   const r = driverReqState.find((x) => x.id === id);
@@ -1902,13 +1926,22 @@ function openDriverWarning(id) {
     'نصّ الإنذار الذي سيظهر لصاحب التوصيل في شاشته',
     async (message) => {
       try {
-        await db.collection('driver_warnings').doc(id).set({
+        const ref = db.collection('driver_warnings').doc(id);
+        const batch = db.batch();
+        batch.set(ref, {
           phone: id,
           message: message,
           admin_name: ADMIN.full_name,
           created_at: firebase.firestore.FieldValue.serverTimestamp(),
           acknowledged: false,
+          count: firebase.firestore.FieldValue.increment(1),
+        }, { merge: true });
+        batch.set(ref.collection('history').doc(), {
+          message: message,
+          admin_name: ADMIN.full_name,
+          created_at: firebase.firestore.FieldValue.serverTimestamp(),
         });
+        await batch.commit();
         await logActivity('إرسال إنذار لصاحب توصيل', name);
         toast('تم إرسال الإنذار');
         loadDriverRequests();
@@ -1919,6 +1952,98 @@ function openDriverWarning(id) {
       confirm: 'إرسال',
       value: (current && current.message) ? current.message : DRIVER_WARNING_DEFAULT,
     }
+  );
+}
+
+/**
+ * يعرض سجلّ إنذارات صاحب التوصيل: نصّ كل إنذار وتاريخه ومن أرسله.
+ *
+ * **الترتيب تنازلي لا تصاعدي:** الأحدث أولاً هو ما يهمّ المشرف قبل قرار
+ * الطرد، والسجلّ قد يطول. والترتيب على حقل واحد بلا فهرس مركّب.
+ */
+function openDriverWarningHistory(id) {
+  const r = driverReqState.find((x) => x.id === id);
+  const name = r ? esc(r.name) : id;
+  openModal({
+    title: 'سجلّ إنذارات: ' + name,
+    body: '<div id="warn-history" class="rv-body"><div class="rv-empty">جارٍ تحميل السجلّ...</div></div>',
+    foot: '<button class="modal-btn ghost" onclick="this.closest(\'.doc-lightbox\').remove()">إغلاق</button>',
+  });
+  db.collection('driver_warnings').doc(id).collection('history')
+    .orderBy('created_at', 'desc').get()
+    .then((snap) => {
+      const host = document.getElementById('warn-history');
+      // **الحارس يمنع الكتابة على عنصر رحل:** الفتح أخذ زمن الشبكة، فقد
+      // يُغلق المشرف النافذة قبل وصول السجلّ.
+      if (!host) return;
+      if (snap.empty) {
+        host.innerHTML = '<div class="rv-empty">لا إنذارات مسجّلة</div>';
+        return;
+      }
+      host.innerHTML = snap.docs.map((d, i) => {
+        const w = d.data();
+        return '<div class="rv-item"><div class="rv-meta">' +
+          '<strong>إنذار ' + (snap.size - i) + '</strong>' +
+          '<span class="act-time">' + fmtDate(w.created_at) + ' — ' + esc(w.admin_name || '') + '</span>' +
+          '<p>' + esc(w.message || '') + '</p>' +
+          '</div></div>';
+      }).join('');
+    })
+    .catch((err) => {
+      const host = document.getElementById('warn-history');
+      if (host) host.innerHTML = '<div class="rv-empty">تعذّر تحميل السجلّ: ' + esc(err.message) + '</div>';
+    });
+}
+
+/**
+ * يطرد صاحب توصيل نهائياً: يغلق حسابه ويمنع رقمه من التسجيل لاحقاً.
+ *
+ * **ليس تعطيلاً بل إغلاقٌ دائم:** يُحذف الحساب وفهرس الدخول ومستند
+ * التوفّر في `batch` واحدة، فيصير الرقم لا يدخل. ثم يُكتب
+ * `banned_drivers/{phone}` وبه ترفض القاعدة أي طلب تسجيل جديد بالرقم
+ * نفسه — حتى لو حاول أحد الكتابة إلى Firestore مباشرة. وهذا هو بند
+ * «تكرار المخالفة: إغلاق الحساب نهائياً» في شروط التسجيل.
+ *
+ * **وطلب التسجيل يبقى بعلامته:** لا يُحذف، بل حالته تصير `banned` فيبقى
+ * في الجدول سجلاً مرئياً لمن طُرد، ولا تعود عليه أزرار الإنذار أو الطرد.
+ *
+ * **ولماذا يُطلب السبب؟** الطرد لا رجعة فيه، فسطرٌ مكتوب يجعل القرار
+ * مقصوداً لا نقرةً عابرة، ويُسجَّل في سجلّ النشاط للمراجعة.
+ */
+function expelDriver(id) {
+  const r = driverReqState.find((x) => x.id === id);
+  const name = r ? r.name : id;
+  const warnCount = (driverWarningsMap[id] && Number(driverWarningsMap[id].count)) || 0;
+  askText(
+    'طرد وإغلاق الحساب نهائياً',
+    'سبب الطرد (يُسجَّل في سجلّ النشاط ولا يظهر لصاحب التوصيل)',
+    async (reason) => {
+      try {
+        const batch = db.batch();
+        batch.delete(db.collection('driver_accounts').doc(id));
+        batch.delete(db.collection('driver_login_index').doc(id));
+        batch.delete(db.collection('driver_public').doc(id));
+        batch.set(db.collection('banned_drivers').doc(id), {
+          phone: id,
+          reason: reason,
+          admin_name: ADMIN.full_name,
+          banned_at: firebase.firestore.FieldValue.serverTimestamp(),
+          warnings_count: warnCount,
+        });
+        batch.update(db.collection('driver_applications').doc(id), {
+          status: 'banned',
+          review_note: reason,
+          reviewed_by: ADMIN.full_name,
+          reviewed_at: firebase.firestore.FieldValue.serverTimestamp(),
+        });
+        await batch.commit();
+        await logActivity('طرد صاحب توصيل وإغلاق حسابه', name);
+        toast('تم الطرد ومنع الرقم من التسجيل');
+        refreshNavBadges();
+        loadDriverRequests();
+      } catch (err) { toast(err.message, true); }
+    },
+    { required: true, confirm: 'طرد نهائي' }
   );
 }
 
