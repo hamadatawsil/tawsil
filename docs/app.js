@@ -1587,7 +1587,33 @@ const DRIVER_STATUS_LABELS = {
   rejected: 'مرفوض',
 };
 
+/* **النصّ الافتراضي للإنذار من شروط التسجيل نفسها:** المشرف غالباً يرسل
+ * الإنذار الأول بلا تعديل، وهذا النصّ يطابق بند «المخالفة الأولى: إنذار»
+ * الذي وافق عليه صاحب التوصيل عند التسجيل، فلا يأتيه ما لم يوافق عليه.
+ * ويبقى قابلاً للتحرير قبل الإرسال. */
+const DRIVER_WARNING_DEFAULT =
+  'تنبيه رسمي: ضياع الرسالة أو الإخلال بالأمانة مسؤوليتك، وهذه مخالفة أولى وإنذار. ' +
+  'وتكرار المخالفة يُغلق حسابك نهائياً دون استرجاع رسوم الاشتراك.';
+
 let driverReqFilter = '';
+
+/* **إنذارات أصحاب التوصيل بمفتاح الرقم:** تُقرأ مع الطلبات لتُعرض حالة
+ * الإنذار في العمود نفسه: قائمٌ (لم يُطّلع عليه) أو مُطّلعٌ عليه. */
+let driverWarningsMap = {};
+
+/* **فشل قراءة الإنذارات لا يُسقط جدول الطلبات:** لو لم تُنشر قواعد
+ * `driver_warnings` بعد، أو تعذّرت الشبكة، يُعرض الجدول بلا علامة إنذار
+ * بدل أن يبقى فارغاً. والعلامة الغائبة أهونُ من جدولٍ لا يُقرأ. */
+async function loadDriverWarnings() {
+  try {
+    const snap = await db.collection('driver_warnings').get();
+    const map = {};
+    snap.docs.forEach((d) => { map[d.id] = d.data(); });
+    return map;
+  } catch (err) {
+    return {};
+  }
+}
 
 async function loadDriverRequests() {
   // **بلا `orderBy` على `createdAt`:** الحقل يُكتب بـ`serverTimestamp` من
@@ -1595,6 +1621,7 @@ async function loadDriverRequests() {
   // (composite) لا تحتاجه لوحة بصف واحد. والأحدث أولاً هنا أقل أهمية من
   // صحّة النتائج: الفرز يتمّ في المتصفّح على القيمة المحسوبة.
   const snap = await db.collection('driver_applications').get();
+  driverWarningsMap = await loadDriverWarnings();
   let rows = snap.docs.map(d => ({ id: d.id, ...d.data() }));
   // **الفرز بعد الجلب لا قبله:** الطابع الزمني يُسخَّن محلياً بعد قراءة
   // المستند، فيصير رقماً يمكن المقارنة به بدل كائن `Timestamp`.
@@ -1604,7 +1631,7 @@ async function loadDriverRequests() {
 
   const body = $('#driverreq-body');
   if (!driverReqState.length) {
-    body.innerHTML = '<tr class="empty-row"><td colspan="6">لا توجد طلبات تسجيل</td></tr>';
+    body.innerHTML = '<tr class="empty-row"><td colspan="7">لا توجد طلبات تسجيل</td></tr>';
     return;
   }
   body.innerHTML = driverReqState
@@ -1613,6 +1640,15 @@ async function loadDriverRequests() {
       const badge = '<span class="badge ' + esc(st) + '">' +
         esc(DRIVER_STATUS_LABELS[st] || st) + '</span>';
       const note = r.review_note ? '<div class="req-note">' + esc(r.review_note) + '</div>' : '';
+      // **علامة الإنذار للمقبول وحده:** من لم يُقبل بعد لا حساب له في
+      // الشاشة، فالإنذار قبل القبول بلا معنًى. والعلامة تكشف ما لا يكشفه
+      // النصّ: هل اطّلع صاحب التوصيل على الإنذار أم ما زال قائماً.
+      const warn = driverWarningsMap[r.id];
+      const warnChip = (st === 'approved' && warn)
+        ? (warn.acknowledged
+            ? '<span class="badge approved">اطّلع على الإنذار</span>'
+            : '<span class="badge rejected">إنذار قائم</span>')
+        : '';
       let actions = '<div class="row-actions">';
       // **الأزرار تظهر للقيد فقط:** طلب مقبول أو مرفوض لا يُراجَع مرّة
       // ثانية من هنا، فإعادة فتحه تعني إقراراً غير مسجّل على منافس
@@ -1623,6 +1659,14 @@ async function loadDriverRequests() {
           '<button class="btn-sm ok" onclick="reviewDriverRequest(\'' + esc(r.id) + '\',\'approve\')">قبول</button>' +
           '<button class="btn-sm no" onclick="reviewDriverRequest(\'' + esc(r.id) + '\',\'reject\')">رفض</button>';
       }
+      // **زرّ الإنذار للمقبول وحده:** الإنذار وسيلة ضبط حسابٍ قائم،
+      // ومن ليس له حساب بعد لا يُنذَر. والملفّ يلمس مفتاح الرقم وحده،
+      // فلا تُحمل الاسم في `onclick` (فيه محارف تُفسد السطر) بل يُقرأ من
+      // الحالة هنا كما يفعل `reviewDriverRequest`.
+      if (st === 'approved') {
+        actions += '<button class="btn-sm blue" onclick="openDriverWarning(\'' + esc(r.id) + '\')">' +
+          (warn ? 'إنذار جديد' : 'إنذار') + '</button>';
+      }
       actions += '<button class="btn-sm no" onclick="deleteDriverRequest(\'' + esc(r.id) + '\')">حذف</button></div>';
       return (
         '<tr>' +
@@ -1632,7 +1676,7 @@ async function loadDriverRequests() {
         '<td style="direction:ltr;text-align:right">' + esc(r.phone) + '</td>' +
         '<td><span class="doc-chip">' + DRIVER_DOC_IDS.length + ' وثائق</span></td>' +
         '<td>' + fmtDate(r.createdAt) + '</td>' +
-        '<td>' + badge + note + '</td>' +
+        '<td>' + badge + warnChip + note + '</td>' +
         '<td>' + actions + '</td>' +
         '</tr>'
       );
@@ -1835,6 +1879,46 @@ function deleteDriverRequest(id) {
       } catch (err) { toast(err.message, true); }
     },
     { danger: true, confirm: 'حذف' }
+  );
+}
+
+/**
+ * يرسل إنذاراً لصاحب توصيل معتمد، فيظهر في شاشته بطاقةً حتى يطّلع عليه.
+ *
+ * **يُكتب بمعرّف هو الرقم، فيقرؤه التطبيق بـ`get`:** لا استعلام على
+ * المجموعة، والقواعد تسمح للتطبيق بقراءة مستندٍ واحد بمعرّفه كما فهرس
+ * الدخول. ولهذا المعرّف رقم لا معرّف عشوائي.
+ *
+ * **و`set` بلا دمج يصفّر الاطّلاع:** إنذارٌ جديد لنفس الرقم يجب أن يعود
+ * قائماً. ولو دُمج لبقي `acknowledged: true` من إنذار سابق فظهر الجديد
+ * وهو مخفيّ — إنذارٌ لا يراه أحد.
+ */
+function openDriverWarning(id) {
+  const r = driverReqState.find((x) => x.id === id);
+  const name = r ? r.name : id;
+  const current = driverWarningsMap[id];
+  askText(
+    'إرسال إنذار',
+    'نصّ الإنذار الذي سيظهر لصاحب التوصيل في شاشته',
+    async (message) => {
+      try {
+        await db.collection('driver_warnings').doc(id).set({
+          phone: id,
+          message: message,
+          admin_name: ADMIN.full_name,
+          created_at: firebase.firestore.FieldValue.serverTimestamp(),
+          acknowledged: false,
+        });
+        await logActivity('إرسال إنذار لصاحب توصيل', name);
+        toast('تم إرسال الإنذار');
+        loadDriverRequests();
+      } catch (err) { toast(err.message, true); }
+    },
+    {
+      required: true,
+      confirm: 'إرسال',
+      value: (current && current.message) ? current.message : DRIVER_WARNING_DEFAULT,
+    }
   );
 }
 
