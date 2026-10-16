@@ -426,6 +426,26 @@ tbody tr:hover { background: #fafcfa; }
   font-weight: 700;
 }
 
+/* صورة الزبون في جدول الزبائن: دائرة صغيرة بجانب الاسم. */
+.cell-user { display: flex; align-items: center; gap: 10px; }
+.avatar {
+  width: 34px;
+  height: 34px;
+  border-radius: 50%;
+  object-fit: cover;
+  flex: 0 0 auto;
+  border: 1px solid rgba(0, 0, 0, 0.08);
+}
+.avatar-fallback {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--primary-light);
+  color: var(--primary);
+  font-weight: 700;
+  font-size: 14px;
+}
+
 .badge.new { background: var(--blue-light); color: var(--blue); }
 .badge.accepted { background: #fff4e0; color: #b9760a; }
 .badge.en_route { background: #eee9fb; color: #5b3ac7; }

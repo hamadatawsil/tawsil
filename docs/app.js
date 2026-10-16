@@ -2412,8 +2412,14 @@ async function loadCustomers() {
     .map((c) =>
       '<tr>' +
       '<td style="font-size:11px;max-width:80px;overflow:hidden;text-overflow:ellipsis" title="' + esc(c.id) + '">' + esc(c.id.substring(0, 8)) + '</td>' +
-      '<td><strong>' + esc(c.name) + '</strong>' +
+      '<td>' +
+      '<div class="cell-user">' +
+      (c.photo
+        ? '<img class="avatar" alt="" src="data:image/jpeg;base64,' + c.photo + '">'
+        : '<span class="avatar avatar-fallback">' + esc(((c.name || '?').trim().charAt(0)) || '?') + '</span>') +
+      '<div><strong>' + esc(c.name) + '</strong>' +
       (c.blocked ? ' <span class="badge rejected">محظور</span>' : (c.is_active === 0 ? ' <span class="badge inactive">موقوف</span>' : '')) +
+      '</div></div>' +
       '</td>' +
       '<td>' + esc(c.phone) + '</td>' +
       '<td>' + fmtDateShort(c.joined_at) + '</td>' +
