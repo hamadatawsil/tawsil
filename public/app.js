@@ -1640,6 +1640,12 @@ async function loadDriverRequests() {
   const snap = await db.collection('driver_applications').get();
   driverWarningsMap = await loadDriverWarnings();
   driverBannedSet = await loadBannedDrivers();
+  // **ملفّات أصحاب التوصيل الشخصية:** الاسم المعدَّل والصورة يأتيان من
+  // `driver_profiles`، فيُدمجان بالرقم. ومن لا مستند له (قُبل قبل الميزة)
+  // يبقى على اسم الطلب بلا صورة.
+  const profilesSnap = await db.collection('driver_profiles').get();
+  const profiles = {};
+  profilesSnap.docs.forEach((d) => { profiles[d.id] = d.data() || {}; });
   let rows = snap.docs.map(d => ({ id: d.id, ...d.data() }));
   // **الفرز بعد الجلب لا قبله:** الطابع الزمني يُسخَّن محلياً بعد قراءة
   // المستند، فيصير رقماً يمكن المقارنة به بدل كائن `Timestamp`.
@@ -1688,11 +1694,22 @@ async function loadDriverRequests() {
           '<button class="btn-sm no" onclick="expelDriver(\'' + esc(r.id) + '\')">طرد وإغلاق الحساب</button>';
       }
       actions += '<button class="btn-sm no" onclick="deleteDriverRequest(\'' + esc(r.id) + '\')">حذف</button></div>';
+      // **الاسم المعدَّل والصورة من ملفّه الشخصي:** يُفضَّل اسم الملفّ إن
+      // وُجد، وإلا اسم الطلب. والصورة في دائرة كجدول الزبائن، وبديلها
+      // الحرف الأول.
+      const prof = profiles[r.id] || {};
+      const dispName = (typeof prof.name === 'string' && prof.name.trim()) ? prof.name : r.name;
       return (
         '<tr>' +
         '<td style="font-size:11px;max-width:90px;overflow:hidden;text-overflow:ellipsis" title="' + esc(r.id) + '">' +
           esc(r.id.substring(0, 10)) + '</td>' +
-        '<td><strong>' + esc(r.name) + '</strong></td>' +
+        '<td>' +
+        '<div class="cell-user">' +
+        (prof.photo
+          ? '<img class="avatar" alt="" src="data:image/jpeg;base64,' + prof.photo + '">'
+          : '<span class="avatar avatar-fallback">' + esc(((dispName || '?').trim().charAt(0)) || '?') + '</span>') +
+        '<div><strong>' + esc(dispName) + '</strong></div>' +
+        '</div></td>' +
         '<td style="direction:ltr;text-align:right">' + esc(r.phone) + '</td>' +
         '<td><span class="doc-chip">' + DRIVER_DOC_IDS.length + ' وثائق</span></td>' +
         '<td>' + fmtDate(r.createdAt) + '</td>' +
@@ -1841,6 +1858,13 @@ async function reviewDriverRequest(id, action) {
         batch.set(db.collection('driver_login_index').doc(id), {
           passwordHash: hash,
         });
+        // **ملفّ صاحب التوصيل الشخصي يُنشأ هنا باسمه:** فيجد اسمه مكتوباً
+        // في شاشة ملفّه لا فارغاً، ويعدّله من التطبيق بعدها. و`merge` حتى
+        // لا يمحو صورةً رفعها لو أُعيد القبول بعد رفض.
+        batch.set(db.collection('driver_profiles').doc(id), {
+          name: data.name || '',
+          createdAt: now,
+        }, { merge: true });
         // **`update` لا `set`:** الطلب مستند فيه `name` و`phone` و
         // `passwordHash` و`createdAt`. و`set` بلا `merge` يستبدل المستند
         // كاملاً فيمحو الاسم والبصمة وتاريخ التقديم، فيصبح القبول بلا
@@ -2023,6 +2047,7 @@ function expelDriver(id) {
         batch.delete(db.collection('driver_accounts').doc(id));
         batch.delete(db.collection('driver_login_index').doc(id));
         batch.delete(db.collection('driver_public').doc(id));
+        batch.delete(db.collection('driver_profiles').doc(id));
         batch.set(db.collection('banned_drivers').doc(id), {
           phone: id,
           reason: reason,
