@@ -11,7 +11,7 @@ let driverReqState = [];
 /* ---------- إعدادات المكالمات: بروتوكول التطبيق نفسه ---------- */
 const CALL_ADMIN_ID = 'admin';
 const RING_TIMEOUT_MS = 60000;
-const RUN_SHA = 'v20261025-2';
+const RUN_SHA = 'v20261025-3';
 
 /// مستند الإشارة: الاسم نفسه الذي يقرؤه `call_service_inapp.dart` في الجوّال.
 const SIGNAL_COLLECTION = 'call_signal';
@@ -1079,10 +1079,15 @@ function openNewCallModal(preset) {
 /* ---------- سجلّ التواصل ---------- */
 
 /*
- * **لماذا هو هنا؟** لأنّ كل ضغطة على زر الاتصال في التطبيق تكتب رحلةً في
+ * **لماذا هو هنا؟** لأنّ كل مكالمةٍ وصلت تكتب رحلةً في
  * `customers/{phone}/trips`. من هذا السجلّ وحده يعرف المشرف كيف تواصل
  * الناس فعلًا: كم مكالمةً عبرت بروتوكول التطبيق، وكم بقي عالقًا على
  * واتساب أو شريحة الهاتف — ولا يُقرأ شيء من هذا في جدول الطلبات.
+ *
+ * **والرحلة مكالمةٌ لا ضغطة:** التطبيق صار يحفظ الرحلة حين تُغلق شاشة
+ * المكالمة وقد سمع الطرفان بعضهما، فلا تُعدّ مكالمةٌ رُفضت أو لم تُرَد
+ * تواصلًا. ومن قرأ السجلّ ووجد زبونًا «مكالماته أقلّ» مما كان، فذاك صدق
+ * القائمة لا نقصٌ فيها.
  *
  * **والقنوات القديمة تُعرض لا تُمحى:** `sim` و`whatsapp` لم يعد التطبيق
  * ينتجهما بعد حذف الجسر إلى شريحة الهاتف، و`agora` اسم رحلات ما قبل
@@ -2785,17 +2790,84 @@ function presenceCell(presence) {
   return '<span class="badge rejected">نبضه انقطع قبل ' + mins + ' د</span>';
 }
 
+/**
+ * إحداثيات الزبائن المُسلَّمة لأصحاب التوصيل: `trip_requests/{phone}`.
+ *
+ * **ولماذا هي عمودٌ هنا؟** لأنّها الشقّ الثاني من الدائرة: الزبون يرى
+ * القريبين ويتّصل، فإذا تمت المكالمة سُلِّم العنوان إلى السائق. وحين يقول
+ * سائقٌ «جاءني طلبٌ بموقعٍ خاطئ» أو «المكالمة تمت ولم يأتني موقع»، كان
+ * الجواب في هذه الخلية لا في سؤال الزبون.
+ *
+ * **والقراءة بالرقم لا بالسرد:** القواعد تمنع `list` على `trip_requests`
+ * وتفتح `get`، ومفتاح المستند هو رقم السائق — فأرقام اللوحة معروفة سلفاً،
+ * فلا حاجة إلى سردٍ محظور.
+ */
+async function loadHandovers(phones) {
+  const docs = await Promise.all(
+    phones.map((phone) =>
+      db
+        .collection('trip_requests')
+        .doc(phone)
+        .get()
+        .then((d) => (d.exists ? d.data() : null))
+        .catch(() => null)
+    )
+  );
+  const byPhone = {};
+  phones.forEach((phone, i) => {
+    const data = docs[i];
+    if (!data) return;
+    const at = data.createdAt;
+    byPhone[phone] = {
+      customerPhone: typeof data.customerPhone === 'string' ? data.customerPhone : '',
+      lat: typeof data.lat === 'number' ? data.lat : null,
+      lng: typeof data.lng === 'number' ? data.lng : null,
+      atMs: at && typeof at.toMillis === 'function' ? at.toMillis() : null,
+    };
+  });
+  return byPhone;
+}
+
+/** خلية التسليم: عنوانُ زبونٍ ينتظر هذا السائق، أو لا شيء. */
+function handoverCell(handover) {
+  if (!handover) return '<span class="badge offline">بلا تسليم</span>';
+  // **(0,0) كذبٌ معروف:** منتصف المحيط ليس عنواناً. التطبيق لم يعد يكتبه
+  // حين صارت الإحداثيات تُسلَّم بعد المكالمة وبشرط وجودها، لكن نسخ APK
+  // القديمة في السوق تكتبه — فاللوحة تُنبّه ولا تعرض «مُسلَّم» على لا شيء.
+  if (handover.lat === 0 && handover.lng === 0) {
+    return '<span class="badge rejected">موقع كاذب (0,0)</span>';
+  }
+  if (handover.lat === null || handover.lng === null) {
+    return '<span class="badge pending">طلبٌ بلا إحداثيات</span>';
+  }
+  const coords = handover.lat.toFixed(4) + ', ' + handover.lng.toFixed(4);
+  const age = handover.atMs === null
+    ? ''
+    : ' · منذ ' + Math.max(0, Math.round((Date.now() - handover.atMs) / 60000)) + ' د';
+  return (
+    '<span class="badge accepted">مُسلَّم' + age + '</span>' +
+    '<div style="font-size:11px;color:var(--gray);direction:ltr">' +
+    esc(coords) + ' · ' + esc(handover.customerPhone) +
+    '</div>'
+  );
+}
+
 async function loadProviders() {
   const snap = await db.collection('providers').get();
   providersState = snap.docs.map(d => ({ id: d.id, ...d.data() }));
   const body = $('#providers-body');
   if (!providersState.length) {
-    body.innerHTML = '<tr class="empty-row"><td colspan="10">لا يوجد أصحاب توصيل</td></tr>';
+    body.innerHTML = '<tr class="empty-row"><td colspan="11">لا يوجد أصحاب توصيل</td></tr>';
     return;
   }
   // **ظهورهم للزبائن من `driver_public`:** أرقامٌ مفتّحة على مستنداتها،
   // بقراءة واحدة لكل رقم لا سرداً محظوراً على اللوحة.
   const presence = await loadPresence(
+    providersState.map((p) => String(p.phone || '')).filter(Boolean)
+  );
+  // **وإحداثيات الزبائن المُسلَّمة إليهم:** `trip_requests/{رقم السائق}`،
+  // والمفتاح هو الرقم نفسه فالحاجة القراءةُ بالرقم لا سردَ المجموعة.
+  const handovers = await loadHandovers(
     providersState.map((p) => String(p.phone || '')).filter(Boolean)
   );
   body.innerHTML = providersState
@@ -2811,6 +2883,7 @@ async function loadProviders() {
       '</td>' +
       '<td>' + esc(p.phone) + '</td>' +
       '<td>' + presenceCell(presence[String(p.phone)]) + '</td>' +
+      '<td>' + handoverCell(handovers[String(p.phone)]) + '</td>' +
       '<td>' + esc(p.plate || '') + '</td>' +
       '<td>★ ' + esc(p.rating || 0) + '</td>' +
       '<td><span class="badge ' + (p.is_connected ? 'online' : 'offline') + '">' + (p.is_connected ? 'متصل' : 'غير متصل') + '</span></td>' +
