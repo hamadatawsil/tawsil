@@ -11,7 +11,7 @@ let driverReqState = [];
 /* ---------- إعدادات المكالمات: بروتوكول التطبيق نفسه ---------- */
 const CALL_ADMIN_ID = 'admin';
 const RING_TIMEOUT_MS = 60000;
-const RUN_SHA = 'v20261025-1';
+const RUN_SHA = 'v20261025-2';
 
 /// مستند الإشارة: الاسم نفسه الذي يقرؤه `call_service_inapp.dart` في الجوّال.
 const SIGNAL_COLLECTION = 'call_signal';
@@ -2727,14 +2727,77 @@ function deleteOrder(id) {
 
 /* ---------- Providers ---------- */
 
+/**
+ * ظهور صاحب التوصيل للزبائن، بمقياس الزبون نفسه لا بمقياس آخر.
+ *
+ * **الثلاث قيم في تطبيق الهاتف:** نصف القطر 1 كم (`nearbyDriversMaxKm`)،
+ * والنبض كل دقيقة (`driverLocationHeartbeatInterval`)، والنافذة ثلاث دقائق
+ * (`nearbyDriversStaleAfter`). فالمشرف يرى «قديماً» بما يُخفى به السائق عن
+ * الزبون فعلاً، وإلا عرضت اللوحة «متاحاً» لا يراه زبونٌ فتضلّل المشرف.
+ */
+const DRIVER_STALE_MS = 3 * 60 * 1000;
+
+/** يقرأ `driver_public` لأرقام أصحاب التوصيل كلها، مستنداً لكل رقم. */
+async function loadPresence(phones) {
+  const docs = await Promise.all(
+    phones.map((phone) =>
+      db
+        .collection('driver_public')
+        .doc(phone)
+        .get()
+        // **بجهد مبذول:** رقمٌ بلا مستند، أو قراءة رُفضت، تُقرأ «لا ظهور»
+        // لا تُعطّل الجدول كلّه؛ فاللوحة تخدم المشرف لا تخدم Firestore.
+        .then((d) => (d.exists ? d.data() : null))
+        .catch(() => null)
+    )
+  );
+  const byPhone = {};
+  phones.forEach((phone, i) => {
+    const data = docs[i];
+    if (!data) return;
+    const at = data.locationAt;
+    byPhone[phone] = {
+      available: data.available === true,
+      lat: typeof data.lat === 'number' ? data.lat : null,
+      lng: typeof data.lng === 'number' ? data.lng : null,
+      atMs: at && typeof at.toMillis === 'function' ? at.toMillis() : null,
+    };
+  });
+  return byPhone;
+}
+
+/** خلية الظهور: ما يراه الزبون الآن عن هذا الرقم. */
+function presenceCell(presence) {
+  // **الأخضر حضورٌ، والرمادي غيابٌ، والأحمر تناقض:** «متاح الآن» أزرق،
+  // و«غير متاح»/«لا ظهور» رماديّان لأنهما قرار السائق لا عطله، ولا يُحمَل
+  // المشرف همّهما. والأحمر حالة واحدة: المفتاح مفعّل والنبض انقطع.
+  if (!presence) return '<span class="badge offline">لا ظهور</span>';
+  if (!presence.available) return '<span class="badge offline">غير متاح</span>';
+  // **بلا زمن:** مستندٌ «متاح» لم يكتب قطّ لحظة قياس — قديمٌ من بناءٍ سابق
+  // أو كتابةٌ يدوية من اللوحة. كذبٌ أخضر أمّاه، فأصفرٌ يسأل المشرف عنه.
+  if (presence.atMs === null) return '<span class="badge pending">متاح · بلا زمن</span>';
+  const ageMs = Date.now() - presence.atMs;
+  if (ageMs <= DRIVER_STALE_MS) return '<span class="badge online">متاح الآن</span>';
+  // **انقطع نبضه:** المفتاح «متاح» كتابةٌ من زمنٍ مضى، والزبون أسقطه من
+  // دائرته. هذه هي الحالة التي يسأل المشرف عنها حين يقول سائقٌ
+  // «لا يتصل بي أحد» وهو يظنّ نفسه ظاهراً للزبائن.
+  const mins = Math.round(ageMs / 60000);
+  return '<span class="badge rejected">نبضه انقطع قبل ' + mins + ' د</span>';
+}
+
 async function loadProviders() {
   const snap = await db.collection('providers').get();
   providersState = snap.docs.map(d => ({ id: d.id, ...d.data() }));
   const body = $('#providers-body');
   if (!providersState.length) {
-    body.innerHTML = '<tr class="empty-row"><td colspan="9">لا يوجد أصحاب توصيل</td></tr>';
+    body.innerHTML = '<tr class="empty-row"><td colspan="10">لا يوجد أصحاب توصيل</td></tr>';
     return;
   }
+  // **ظهورهم للزبائن من `driver_public`:** أرقامٌ مفتّحة على مستنداتها،
+  // بقراءة واحدة لكل رقم لا سرداً محظوراً على اللوحة.
+  const presence = await loadPresence(
+    providersState.map((p) => String(p.phone || '')).filter(Boolean)
+  );
   body.innerHTML = providersState
     .map((p) =>
       '<tr>' +
@@ -2747,6 +2810,7 @@ async function loadProviders() {
       (p.blocked ? ' <span class="badge rejected">محظور</span>' : '') +
       '</td>' +
       '<td>' + esc(p.phone) + '</td>' +
+      '<td>' + presenceCell(presence[String(p.phone)]) + '</td>' +
       '<td>' + esc(p.plate || '') + '</td>' +
       '<td>★ ' + esc(p.rating || 0) + '</td>' +
       '<td><span class="badge ' + (p.is_connected ? 'online' : 'offline') + '">' + (p.is_connected ? 'متصل' : 'غير متصل') + '</span></td>' +
