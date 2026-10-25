@@ -7,7 +7,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=Tajawal:wght@400;500;700;800;900&display=swap" rel="stylesheet" />
-  <link rel="stylesheet" href="style.css?v=20261025g" />
+  <link rel="stylesheet" href="style.css?v=20261025i" />
   <script src="https://www.gstatic.com/firebasejs/10.14.1/firebase-app-compat.js"></script>
   <script src="https://www.gstatic.com/firebasejs/10.14.1/firebase-auth-compat.js"></script>
   <script src="https://www.gstatic.com/firebasejs/10.14.1/firebase-firestore-compat.js"></script>
@@ -269,6 +269,7 @@
           <h3 class="section-title">أصحاب التوصيل</h3>
           <span id="providers-access-note" class="badge offline"></span>
           <button class="btn-ghost ok" onclick="backfillAccess()">توحيد الصلاحيات</button>
+          <button class="btn-ghost no" onclick="eraseProviderPasswords()">طمس كلمات السرّ المخزّنة</button>
           <button class="btn-ghost" data-reload="providers">تحديث</button>
         </div>
         <div class="table-card">
@@ -388,6 +389,6 @@
 
   <div id="modal-root"></div>
   <div id="toast" class="toast hidden"></div>
-  <script src="app.js?v=20261025g"></script>
+  <script src="app.js?v=20261025i"></script>
 </body>
 </html>

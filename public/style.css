@@ -116,50 +116,68 @@ body {
 /* ---------- App layout ---------- */
 .app { display: flex; height: 100vh; }
 
+/* العمودُ داكنٌ كلُّه: إن لم يُحصرِ الطولُ داخلَ الصندوق، سالَت الأسماءُ
+   من تحت التدرُّج وجَلَسَت على بياضِ الصفحة — فيبدو الشريطُ مُرقَّطًا. */
 .sidebar {
   width: 230px;
+  height: 100vh;
   background: linear-gradient(180deg, var(--navy-dark), var(--navy) 55%, var(--navy-light));
   color: #fff;
   display: flex;
   flex-direction: column;
   flex-shrink: 0;
+  overflow: hidden;
 }
 
 .side-brand {
-  padding: 26px 16px 20px;
+  flex: 0 0 auto;
+  padding: 16px 14px;
   border-bottom: 1px solid rgba(255,255,255,0.1);
   display: flex;
-  flex-direction: column;
   align-items: center;
-  text-align: center;
+  gap: 12px;
 }
 .side-brand img {
-  width: 96px;
-  height: 96px;
-  border-radius: 24px;
+  width: 54px;
+  height: 54px;
+  border-radius: 16px;
   display: block;
-  margin-bottom: 14px;
+  flex-shrink: 0;
   object-fit: contain;
-  background: rgba(255,255,255,0.08);
-  box-shadow: 0 10px 30px rgba(0,0,0,0.35), 0 0 0 4px rgba(255,120,0,0.35), 0 0 24px rgba(255,120,0,0.25);
+  background: #fff;
+  box-shadow: 0 6px 18px rgba(0,0,0,0.35), 0 0 0 3px rgba(255,120,0,0.4);
 }
-.side-brand strong { display: block; font-size: 18px; letter-spacing: 0.2px; }
-.side-brand span { font-size: 12px; color: #ffc897; margin-top: 3px; opacity: 0.9; }
+.side-brand strong { display: block; font-size: 16px; letter-spacing: 0.2px; }
+.side-brand span { display: block; font-size: 11.5px; color: #ffc897; margin-top: 2px; opacity: 0.9; }
 
-.side-nav { flex: 1; padding: 12px 0; }
+/* القائمةُ تمرُّ داخلَ عمودِها، فلا تخرجُ عن التدرُّج ولا تُطوِلُ الصفحة. */
+.side-nav {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: 10px 0 14px;
+  scrollbar-width: thin;
+  scrollbar-color: rgba(255,120,0,0.45) rgba(255,255,255,0.05);
+}
+.side-nav::-webkit-scrollbar { width: 8px; }
+.side-nav::-webkit-scrollbar-track { background: rgba(255,255,255,0.05); }
+.side-nav::-webkit-scrollbar-thumb { background: rgba(255,120,0,0.45); border-radius: 8px; }
 
 .nav-item {
   display: flex;
   align-items: center;
   justify-content: space-between;
+  gap: 10px;
   width: 100%;
   background: none;
   border: none;
   color: #c7d2e3;
   text-align: right;
-  padding: 13px 20px;
-  font-size: 14px;
+  padding: 11px 18px;
+  font-size: 13.5px;
   font-weight: 600;
+  line-height: 1.3;
   cursor: pointer;
   font-family: inherit;
   border-right: 3px solid transparent;
@@ -192,11 +210,14 @@ body {
 @keyframes badge-pop { from { transform: scale(0.6); } to { transform: scale(1); } }
 
 .side-user {
+  flex: 0 0 auto;
   border-top: 1px solid rgba(255,255,255,0.1);
-  padding: 14px 16px;
+  padding: 12px 14px;
   display: flex;
   align-items: center;
   justify-content: space-between;
+  gap: 8px;
+  background: rgba(4,17,34,0.55);
 }
 .side-user small { display: block; color: #9fb0c9; }
 
@@ -783,6 +804,7 @@ tbody tr:hover { background: #fafcfa; }
   .sidebar {
     width: 100%;
     height: auto;
+    overflow: visible;
     flex-direction: row;
     flex-wrap: wrap;
     align-items: center;
@@ -792,7 +814,7 @@ tbody tr:hover { background: #fafcfa; }
   .side-brand img { width: 44px; height: 44px; border-radius: 12px; margin-bottom: 0; }
   .side-brand strong { font-size: 15px; }
   .side-brand span { display: none; }
-  .side-nav { display: flex; flex-wrap: wrap; gap: 4px; padding: 6px 0; }
+  .side-nav { display: flex; flex-wrap: wrap; gap: 4px; padding: 6px 0; overflow: visible; }
   .nav-item {
     width: auto;
     padding: 7px 12px;
@@ -801,7 +823,7 @@ tbody tr:hover { background: #fafcfa; }
     font-size: 12.5px;
   }
   .nav-item.active { border-right: none; }
-  .side-user { padding: 6px 8px; border-top: none; }
+  .side-user { padding: 6px 8px; border-top: none; background: none; }
 
   .topbar { padding: 10px 14px; flex-wrap: wrap; gap: 8px; }
   .topbar-actions { gap: 6px; flex-wrap: wrap; }

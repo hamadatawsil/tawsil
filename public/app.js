@@ -62,6 +62,7 @@ const RIGHT_OF = {
   offerTrialTo: 'write',
   grantTrialBatch: 'write',
   backfillAccess: 'write',
+  eraseProviderPasswords: 'owner',
   finishRenewal: 'write',
   reviewRenewal: 'write',
   reviewDriverRequest: 'write',
@@ -129,7 +130,7 @@ function applyRoleChrome() {
 /* ---------- إعدادات المكالمات: بروتوكول التطبيق نفسه ---------- */
 const CALL_ADMIN_ID = 'admin';
 const RING_TIMEOUT_MS = 60000;
-const RUN_SHA = 'v20261025-7';
+const RUN_SHA = 'v20261025-9';
 
 /// مستند الإشارة: الاسم نفسه الذي يقرؤه `call_service_inapp.dart` في الجوّال.
 const SIGNAL_COLLECTION = 'call_signal';
@@ -2082,7 +2083,10 @@ function reviewRequest(id, action) {
             await db.collection('providers').add({
               name: req.name,
               phone: req.phone,
-              password: req.password || '',
+              // **ولا كلمةَ سرّ هنا:** الجدولُ كلُّه للمشرف، لكن نسخهَ إلى
+              // اللوحة تعني أن سرًّا من أسرار الدخول صار نصًّا في مستندٍ لا
+              // يقرؤه أحدٌ للدخول أصلاً — الجوّالُ يقرأ بصمةَ الكلمة في
+              // `driver_login_index`، لا هذا الجدول.
               plate: '',
               rating: 0,
               is_connected: false,
@@ -2223,7 +2227,7 @@ async function saveReviewDocs(btn) {
         await provSnap.docs[0].ref.update(upd);
       } else {
         await db.collection('providers').add({
-          name: req.name, phone: req.phone, password: req.password || '', plate: '', rating: 0,
+          name: req.name, phone: req.phone, plate: '', rating: 0,
           is_connected: false, subscription_active: true, subscription_start: now, subscription_end: endDate,
           blocked: false, created_at: now, photo: personalPhoto || '',
         });
@@ -3976,6 +3980,47 @@ async function backfillAccess() {
     },
     { confirm: 'توحيد' }
   );
+}
+
+/**
+ * طمسُ ما خُزّن قبل اليوم: كان القبولُ ينسخ كلمةَ سرّ صاحب التوصيل نصًّا
+ * إلى جدول اللوحة، والكتابةُ أُغلقت الآن — لكن المستنداتِ القديمة تحمل ما
+ * كُتب فيها. والحقلُ لا يُقرأ للدخول أصلاً، فمسحُهُ لا يقطعُ عن أحدٍ طريقَه.
+ */
+async function eraseProviderPasswords() {
+  try {
+    const snap = await db.collection('providers').get();
+    const stored = snap.docs.filter((d) => {
+      const v = d.data().password;
+      return typeof v === 'string' && v.length > 0;
+    });
+    if (!stored.length) {
+      toast('لا كلمةَ سرّ مخزّنة في جدول أصحاب التوصيل');
+      return;
+    }
+    askConfirm(
+      'طمس كلمات السرّ المخزّنة',
+      'في جدول أصحاب التوصيل <strong>' + stored.length + '</strong> مستندًا يحمل كلمةَ سرٍّ نصًّا. ' +
+      'يمسحها هذا الأمرُ من الجدول وحده، ولا يمسّ الاسمَ ولا الرقمَ ولا تواريخَ الاشتراك.' +
+      '<br><br><strong>لا يتغيّر دخولُ أحد:</strong> التطبيقُ لا يقرأ من هذا الجدول شيئًا.',
+      async () => {
+        try {
+          await commitInChunks(stored.map((d) => ({
+            ref: db.collection('providers').doc(d.id),
+            data: { password: firebase.firestore.FieldValue.delete() },
+            opts: { merge: true },
+          })));
+          await logActivity('طمس كلمات السرّ من جدول أصحاب التوصيل', stored.length + ' مستندًا');
+          toast('طُمست ' + stored.length + ' كلمة سرّ: لم يبقَ في الجدول نصٌّ يقرأه مشرف');
+        } catch (err) {
+          toast(err.message, true);
+        }
+      },
+      { danger: true, confirm: 'طمس' }
+    );
+  } catch (err) {
+    toast(err.message, true);
+  }
 }
 
 /**
