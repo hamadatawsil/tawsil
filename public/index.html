@@ -7,7 +7,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=Tajawal:wght@400;500;700;800;900&display=swap" rel="stylesheet" />
-  <link rel="stylesheet" href="style.css?v=20261025c" />
+  <link rel="stylesheet" href="style.css?v=20261025d" />
   <script src="https://www.gstatic.com/firebasejs/10.14.1/firebase-app-compat.js"></script>
   <script src="https://www.gstatic.com/firebasejs/10.14.1/firebase-auth-compat.js"></script>
   <script src="https://www.gstatic.com/firebasejs/10.14.1/firebase-firestore-compat.js"></script>
@@ -65,6 +65,7 @@
         <button class="nav-item active" data-view="dashboard">لوحة الإحصائيات</button>
         <button class="nav-item" data-view="requests">طلبات الاشتراك<span class="nav-badge hidden" data-badge="requests">0</span></button>
         <button class="nav-item" data-view="driverRequests">تسجيل أصحاب التوصيل<span class="nav-badge hidden" data-badge="driverRequests">0</span></button>
+        <button class="nav-item" data-view="renewals">تجديدات الاشتراك<span class="nav-badge hidden" data-badge="renewals">0</span></button>
         <button class="nav-item" data-view="orders">الطلبات<span class="nav-badge hidden" data-badge="orders">0</span></button>
         <button class="nav-item" data-view="calls">المكالمات<span class="nav-badge hidden" data-badge="calls">0</span></button>
 <button class="nav-item" data-view="trips">سجل التواصل</button>
@@ -166,6 +167,29 @@
           </div>
         </section>
 
+      <section id="view-renewals" class="view">
+        <div class="filter-bar">
+          <div class="seg" id="renewals-seg">
+            <button class="seg-btn" data-status="">الكل</button>
+            <button class="seg-btn active" data-status="pending">قيد الاعتماد<span class="seg-count hidden" data-count="renewals-pending">0</span></button>
+            <button class="seg-btn" data-status="approved">معتمد</button>
+            <button class="seg-btn" data-status="rejected">مرفوض</button>
+          </div>
+          <button class="btn-ghost" data-reload="renewals">تحديث</button>
+        </div>
+        <div class="table-card">
+          <table>
+            <thead>
+              <tr>
+                <th>#</th><th>صاحب التوصيل</th><th>المدفوع</th><th>رقم العملية</th>
+                <th>تاريخ الطلب</th><th>حالته اليوم</th><th>القرار</th><th>إجراءات</th>
+              </tr>
+            </thead>
+            <tbody id="renewals-body"></tbody>
+          </table>
+        </div>
+      </section>
+
       <section id="view-orders" class="view">
         <div class="filter-bar">
           <input id="orders-search" class="search-input" type="text" placeholder="بحث بالاسم أو الحي..." />
@@ -243,6 +267,7 @@
       <section id="view-providers" class="view">
         <div class="filter-bar">
           <h3 class="section-title">أصحاب التوصيل</h3>
+          <button class="btn-ghost ok" onclick="backfillAccess()">توحيد الصلاحيات</button>
           <button class="btn-ghost" data-reload="providers">تحديث</button>
         </div>
         <div class="table-card">
@@ -250,7 +275,7 @@
             <thead>
               <tr>
                 <th>#</th><th>الاسم</th><th>الهاتف</th><th>ظهوره للزبائن</th><th>إحداثيات سُلّمت</th><th>اللوحة</th><th>التقييم</th>
-                <th>الحالة</th><th>الاشتراك</th><th>تاريخ الانتهاء</th><th>إجراءات</th>
+                <th>الحالة</th><th>الاشتراك</th><th>تاريخ الانتهاء</th><th>قرار اللوحة</th><th>إجراءات</th>
               </tr>
             </thead>
             <tbody id="providers-body"></tbody>
@@ -338,6 +363,7 @@
             <input id="set-fee" type="number" min="0" step="1" required />
             <label>رقم استقبال تحويلات الدفع</label>
             <input id="set-phone" type="text" required placeholder="+222 ..." />
+            <p class="login-sub">يقرأ صاحبُ التوصيل هذا الرقم لحظةَ فتحه شاشةَالتجديد، فلا يبقى في هاتفه رقمٌ قديم بعد تغييره.</p>
             <label>نص تعليمات التحويل (يظهر في تطبيق صاحب التوصيل)</label>
             <textarea id="set-note" rows="3" required></textarea>
             <button type="submit" class="btn-primary">حفظ الإعدادات</button>
@@ -361,6 +387,6 @@
 
   <div id="modal-root"></div>
   <div id="toast" class="toast hidden"></div>
-  <script src="app.js?v=20261025c"></script>
+  <script src="app.js?v=20261025d"></script>
 </body>
 </html>

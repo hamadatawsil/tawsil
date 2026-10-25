@@ -11,7 +11,7 @@ let driverReqState = [];
 /* ---------- إعدادات المكالمات: بروتوكول التطبيق نفسه ---------- */
 const CALL_ADMIN_ID = 'admin';
 const RING_TIMEOUT_MS = 60000;
-const RUN_SHA = 'v20261025-3';
+const RUN_SHA = 'v20261025-4';
 
 /// مستند الإشارة: الاسم نفسه الذي يقرؤه `call_service_inapp.dart` في الجوّال.
 const SIGNAL_COLLECTION = 'call_signal';
@@ -299,11 +299,16 @@ async function refreshNavBadges() {
     const resubRef = db.collection('subscription_requests').where('status', '==', 'needs_resubmission');
     const newOrdersRef = db.collection('orders').where('status', '==', 'new');
     const pendingDriversRef = db.collection('driver_applications').where('status', '==', 'pending');
-    const [pending, resub, newOrders, pendingDrivers] = await Promise.all([
+    const pendingRenewalsRef = db.collection(RENEWAL_COLLECTION).where('status', '==', 'pending');
+    const [pending, resub, newOrders, pendingDrivers, pendingRenewals] = await Promise.all([
       pendingRef.count().get(),
       resubRef.count().get(),
       newOrdersRef.count().get(),
       pendingDriversRef.count().get(),
+      // **والخامسة لا تُسقط الأربع:** مُنعت اللوحة قراءةَ التجديدات —
+      // لأن القاعدة لم تُنشر بعد مثلاً — فبقية الشارات تُحسب. فلها
+      // جوابٌ صامتٌ خاص بها، لا `Promise.all` يرمي بالكل.
+      pendingRenewalsRef.count().get().catch(() => null),
     ]);
     setNavBadge('requests', pending.data().count + resub.data().count);
     setNavBadge('orders', newOrders.data().count);
@@ -311,9 +316,14 @@ async function refreshNavBadges() {
     // مختلفتان بمراجعة مختلفة. ودمجهما يجعل عدّاداً يخفي تحته طلبات
     // تسجيل سائقين لا يعرف المشرف أنّها وصلت أصلاً.
     setNavBadge('driverRequests', pendingDrivers.data().count);
+    // **وشيكة التجديدات رابعة:** مالٌ وصل ولا قرارٍ كُتب بعد، وصاحبُه
+    // دفع وينتظر — فهي أوّل ما يجب أن يرى المشرف عند فتح اللوحة.
+    const renewalsCount = pendingRenewals ? pendingRenewals.data().count : 0;
+    setNavBadge('renewals', renewalsCount);
     setSegCount('requests-pending', pending.data().count);
     setSegCount('orders-new', newOrders.data().count);
     setSegCount('driverreq-pending', pendingDrivers.data().count);
+    setSegCount('renewals-pending', renewalsCount);
   } catch {}
 }
 
@@ -1415,7 +1425,7 @@ async function loadAdmins() {
  * الإشعار يبدأ من الزبون نفسه لا من التطبيق: التطبيق لا يكتب في
  * `activity_log` لأن ذلك يمنح أي زبون حقّ الكتابة في سجل الإدارة.
  * فاللوحة تقرأ `customers` وترى من هو جديد، ثم تكتب سطر النشاط **هي**
- * بعد أنzczحقت من Firebase Auth. فالسجل لا يقبل إلا من مشرف، والمشرف
+ * بعد أنُزحقت من Firebase Auth. فالسجل لا يقبل إلا من مشرف، والمشرف
  * وحده يقرّر أنه رأى الزبون.
  *
  * **والمعرّف `customer_<phone>` لا اعتباطي:** لو استعملنا `add()` لأنشأ
@@ -1454,7 +1464,7 @@ function saveSeenCustomers() {
  *
  * **الفصل بين `seen` و`pending` هو ما يجعل الشارة لها معنى:** لو أضاف
  * المستكشفُ الزبونَ إلى `seen` عند رؤيته، لصارت الشارة صفراً بعد ثانية —
- *-Shارة تعني «يوجد من لم تنظر إليه بعد»، فلا يصح أن يُحسَب قد رآه من
+ **الشارة تعني «يوجد من لم تنظر إليه بعد»، فلا يصح أن يُحسَب قد رآه من
  * نظر إليه. فـ`pending` هو من رآه المستكشف ولم تفتحه أنت بعد.
  */
 async function pollNewCustomers() {
@@ -1559,6 +1569,7 @@ const TITLES = {
   dashboard: 'لوحة الإحصائيات',
   requests: 'طلبات الاشتراك',
   driverRequests: 'تسجيل أصحاب التوصيل',
+  renewals: 'تجديدات الاشتراك',
   orders: 'الطلبات',
   calls: 'المكالمات',
   providers: 'أصحاب التوصيل',
@@ -1586,6 +1597,7 @@ async function loadView(name) {
     if (name === 'calls') await loadCalls();
     if (name === 'trips') await loadTrips();
     if (name === 'providers') await loadProviders();
+    if (name === 'renewals') await loadRenewals();
     if (name === 'customers') await loadCustomers();
     if (name === 'areas') await loadAreas();
     if (name === 'admins') await loadAdmins();
@@ -2857,19 +2869,22 @@ async function loadProviders() {
   providersState = snap.docs.map(d => ({ id: d.id, ...d.data() }));
   const body = $('#providers-body');
   if (!providersState.length) {
-    body.innerHTML = '<tr class="empty-row"><td colspan="11">لا يوجد أصحاب توصيل</td></tr>';
+    body.innerHTML = '<tr class="empty-row"><td colspan="12">لا يوجد أصحاب توصيل</td></tr>';
     return;
   }
   // **ظهورهم للزبائن من `driver_public`:** أرقامٌ مفتّحة على مستنداتها،
   // بقراءة واحدة لكل رقم لا سرداً محظوراً على اللوحة.
-  const presence = await loadPresence(
-    providersState.map((p) => String(p.phone || '')).filter(Boolean)
-  );
-  // **وإحداثيات الزبائن المُسلَّمة إليهم:** `trip_requests/{رقم السائق}`،
-  // والمفتاح هو الرقم نفسه فالحاجة القراءةُ بالرقم لا سردَ المجموعة.
-  const handovers = await loadHandovers(
-    providersState.map((p) => String(p.phone || '')).filter(Boolean)
-  );
+  const providerPhones = providersState.map((p) => String(p.phone || '')).filter(Boolean);
+  const [presence, handovers] = await Promise.all([
+    loadPresence(providerPhones),
+    // **وإحداثيات الزبائن المُسلَّمة إليهم:** `trip_requests/{رقم السائق}`،
+    // والمفتاح هو الرقم نفسه فالحاجة القراءةُ بالرقم لا سردَ المجموعة.
+    loadHandovers(providerPhones),
+  ]);
+  // **وقرار اللوحة نفسه:** `driver_access/{الرقم}`، لأن عمود «الاشتراك»
+  // يقرأ `providers` وحده، فيرى المشرف جدولًا يقول «نشط» وصاحبَ الرقم في
+  // لائحة الزبائن محذوف. فالعمودان معًا، والجواب واحد.
+  providersAccess = await loadAccess(providerPhones);
   body.innerHTML = providersState
     .map((p) =>
       '<tr>' +
@@ -2889,7 +2904,9 @@ async function loadProviders() {
       '<td><span class="badge ' + (p.is_connected ? 'online' : 'offline') + '">' + (p.is_connected ? 'متصل' : 'غير متصل') + '</span></td>' +
       '<td><span class="badge ' + (p.subscription_active ? 'active' : 'inactive') + '">' + (p.subscription_active ? 'نشط' : 'موقوف') + '</span></td>' +
       '<td>' + fmtDateShort(p.subscription_end) + '</td>' +
+      '<td>' + accessCell(providersAccess[String(p.phone)]) + '</td>' +
       '<td><div class="row-actions">' +
+      '<button class="btn-sm blue" onclick="openAccessPanel(\'' + esc(p.phone) + '\')">لوحة التحكّم</button>' +
       '<button class="btn-sm blue" onclick="editProvider(\'' + p.id + '\')">تعديل</button>' +
       '<button class="btn-sm blue" onclick="toggleProvider(\'' + p.id + '\',\'is_connected\')">' + (p.is_connected ? 'إيقاف الاتصال' : 'تفعيل الاتصال') + '</button>' +
       '<button class="btn-sm ' + (p.subscription_active ? 'no' : 'ok') + '" onclick="toggleProvider(\'' + p.id + '\',\'subscription_active\')">' + (p.subscription_active ? 'إيقاف الاشتراك' : 'تفعيل الاشتراك') + '</button>' +
@@ -2972,6 +2989,493 @@ async function toggleProvider(id, field) {
     loadProviders();
     loadDashboard();
   } catch (err) { toast(err.message, true); }
+}
+
+/* ---------- صلاحيات أصحاب التوصيل: قرار اللوحة لا نقرَة الهاتف ---------- */
+
+/*
+ * **`driver_access` بمفتاح الرقم، لا `providers` بمعرّفها:** التطبيق
+ * يسأل عن رقم صاحبه الذي دخل به، و`providers` مفتاحها معرّف عشوائي وفيها
+ * كلمة مرور قديمة وقاعدتها تغلقها على المشرف. فالجسر بين اللوحة والهاتف
+ * هو الرقم لا المعرّف — وهو الشيء الوحيد الذي يملكه صاحب التوصيل فعلاً.
+ *
+ * **والكتابة من هنا هي القرار، والقراءة من هناك هي التنفيذ:** اللوحة تكتب
+ * `frozen` و`subscriptionActive` و`subscriptionEnd` و`callsAllowed`،
+ * وتُطفئ شاشةُ صاحب التوصيل ظهورَه نفسه حين يصلها المنع، وتسقط لائحةُ
+ * الزبائن صاحبَه. فلو تُرك الحكم للوحة وحدها والعرض للتطبيق لما نُفِّذ
+ * قرارٌ حتى يُعاد فتح التطبيق.
+ *
+ * **وبلا مستند لا منع:** من قُبل قبل أن توجد هذه اللوحة ليس له مستند،
+ * فهو يعمل. واللوحة تقول ذلك صراحةً في العمود بدل أن تُسكت، لأن الحكم
+ * الخفيّ أخطر من المعلَن ولو اتفقا. وزرّ «توحيد الصلاحيات» يحوّل كل
+ * «بلا قرار» إلى قرارٍ مكتوب باسم صاحبه.
+ */
+const ACCESS_COLLECTION = 'driver_access';
+const RENEWAL_COLLECTION = 'renewal_requests';
+
+/** مدة التمديد بالأيام: ثلاثون لا تقويمُ شهر، لئلّا يختلف الحساب. */
+const SUB_MONTH_DAYS = 30;
+
+const RENEWAL_STATUS_LABELS = {
+  pending: 'بانتظار الاعتماد',
+  approved: 'معتمد',
+  rejected: 'مرفوض',
+};
+
+/** ما تُسمّيه اللوحة كلَّ إجراء على الصلاحية، فيظهر كذلك في سجلّ النشاط. */
+const ACCESS_ACTION_LABELS = {
+  extend: 'تمديد اشتراك شهرًا',
+  stop: 'إيقاف اشتراك',
+  start: 'تفعيل اشتراك',
+  freeze: 'تجميد حساب',
+  unfreeze: 'رفع تجميد حساب',
+  blockCalls: 'منع المكالمات',
+  allowCalls: 'السماح بالمكالمات',
+  note: 'ملاحظة لصاحب التوصيل',
+  clear: 'سحب مستند الصلاحيات',
+};
+
+/** حالة صاحب التوصيل كما قررتها اللوحة، أو `null` إن لم يُكتب بعد. */
+let providersAccess = {};
+
+/**
+ * قراءة صلاحية كل رقم من بين الأرقام.
+ *
+ * **قراءة بالرقم لا سردًا للمجموعة:** `list` على `driver_access` مفتوح
+ * للمشرف وحده، وهو كذلك في القاعدة، لكن البقاء على نمط `loadPresence`
+ * يجعل العمودين يُقرآن بالأسلوب نفسه ويُسقَطان معًا عند تعذّر رقم —
+ * فاللوحة تخدم المشرف لا تخدم Firestore.
+ */
+async function loadAccess(phones) {
+  const unique = Array.from(new Set(phones.filter(Boolean)));
+  const docs = await Promise.all(
+    unique.map((phone) =>
+      db
+        .collection(ACCESS_COLLECTION)
+        .doc(phone)
+        .get()
+        .then((d) => (d.exists ? d.data() : null))
+        .catch(() => null)
+    )
+  );
+  const byPhone = {};
+  unique.forEach((phone, i) => {
+    const data = docs[i];
+    // `null` هنا «لم يُكتب مستند»، والفرق بينه وبين «كُتب ثم حُذف» لا
+    // أثر له عند العرض: الحالتان بلا قرار، وصاحب التوصيل يعمل.
+    if (!data) return;
+    const end = data.subscriptionEnd;
+    byPhone[phone] = {
+      frozen: data.frozen === true,
+      active: data.subscriptionActive !== false,
+      callsAllowed: data.callsAllowed !== false,
+      endMs: end && typeof end.toMillis === 'function' ? end.toMillis() : null,
+      note: typeof data.note === 'string' ? data.note : '',
+    };
+  });
+  return byPhone;
+}
+
+/** خلية القرار: كلمة واحدة تقول للوحة ما يراه الزبون الآن عن هذا الرقم. */
+function accessCell(access) {
+  if (!access) return '<span class="badge offline">بلا قرار · يعمل</span>';
+  if (access.frozen) return '<span class="badge rejected">مجمّد</span>';
+  if (!access.active) return '<span class="badge offline">اشتراك موقوف</span>';
+  if (access.endMs !== null && access.endMs <= Date.now()) {
+    return '<span class="badge rejected">انتهى ' + esc(fmtDateShort(access.endMs)) + '</span>';
+  }
+  const calls = access.callsAllowed
+    ? ''
+    : ' <span class="badge pending">مكالمات موقوفة</span>';
+  const rest = access.endMs === null
+    ? ''
+    : ' · ' + Math.max(0, Math.ceil((access.endMs - Date.now()) / 86400000)) + ' ي';
+  const note = access.note
+    ? '<div style="font-size:11px;color:var(--gray)">' + esc(access.note) + '</div>'
+    : '';
+  return '<span class="badge active">سارٍ' + esc(rest) + '</span>' + calls + note;
+}
+
+/**
+ * كتابة قرارٍ واحد في صلاحية رقم.
+ *
+ * **`merge` لا `set` كامل:** المشرف يجمّد اليوم ويمنع المكالمات غدًا؛
+ * والكتابة الكاملة تمحو ما لم يُذكر، فيجد المشرفُ التجميدَ مرفوعاً وهو
+ * يظنّه باقياً.
+ */
+async function writeAccess(phone, patch, action) {
+  try {
+    await db
+      .collection(ACCESS_COLLECTION)
+      .doc(phone)
+      .set({ ...patch, updatedAt: firebase.firestore.FieldValue.serverTimestamp() }, { merge: true });
+    await logActivity(ACCESS_ACTION_LABELS[action] || action, phone);
+    toast('تم تسجيل القرار في اللوحة');
+    loadProviders();
+    // **والقائمة المفتوحة هي المُحدَّثة:** لوحة التحكّم تُفتح من جدول
+    // أصحاب التوصيل ومن قائمة التجديدات معاً، فلو حُدِّث الجدول وحده
+    // بقيت شارةُ «مجمّد» في الشاشة المفتوحة أمام عينيه قراراً قديماً.
+    if (document.querySelector('#view-renewals.active')) loadRenewals();
+  } catch (err) {
+    toast(err.message, true);
+  }
+}
+
+/**
+ * تاريخ نهايةٍ بعد `days` يومًا.
+ *
+ * **والعدّ من آخر نهاية لا من اليوم:** مدّدَ المشرف شهرًا لسائقٍ بقي له
+ * أحد عشر يومًا فالكلمة «تمديد» لا «تصفير». والعدّ من اليوم يجعل
+ * التجديد المبكر خصمًا على صاحبه، فينتظر آخر يومٍ ليدفع — وهو أسوأ
+ * موعد دفعٍ يمكن أن تختاره لوحة.
+ */
+function nextSubscriptionEnd(access, days) {
+  const now = Date.now();
+  const base = access && access.endMs !== null && access.endMs > now ? access.endMs : now;
+  return new Date(base + days * 86400000);
+}
+
+/** لوحة التحكم في رقم: كل ما يملكه المشرف في حسابه، في مكان واحد. */
+function openAccessPanel(phone) {
+  const access = providersAccess[String(phone)] || null;
+  const p = providersState.find((x) => String(x.phone || '') === String(phone)) || {};
+  const endText = access
+    ? (access.endMs === null ? 'بلا تاريخ انتهاء' : fmtDateShort(access.endMs))
+    : 'لم يُكتب بعد';
+  const btn = (action, label, cls) =>
+    '<button class="btn-sm ' + cls + '" onclick="accessAction(\'' + esc(phone) + '\',\'' + action + '\')">' + label + '</button>';
+  const body =
+    '<div class="rv-body">' +
+    '<p class="login-sub" style="margin-top:0">' +
+    'الاسم: <strong>' + esc(p.name || 'بلا اسم في جدول أصحاب التوصيل') + '</strong><br>' +
+    'الرقم: <strong style="direction:ltr;display:inline-block">' + esc(phone) + '</strong><br>' +
+    'نهاية الدفع: <strong>' + esc(endText) + '</strong>' +
+    (access && access.note ? '<br>ملاحظة الحاليّة: <strong>' + esc(access.note) + '</strong>' : '') +
+    '</p>' +
+    (access
+      ? ''
+      : '<p class="badge pending">لا مستند صلاحيات: يعمل بالسماح، وأيّ زرّ هنا يكتب قرارًا صريحًا.</p>') +
+    '<div class="row-actions" style="flex-wrap:wrap">' +
+    btn('extend', 'تمديد شهر', 'ok') +
+    (access && access.active
+      ? btn('stop', 'إيقاف الاشتراك', 'no')
+      : btn('start', 'تفعيل الاشتراك', 'ok')) +
+    (access && access.frozen
+      ? btn('unfreeze', 'رفع التجميد', 'ok')
+      : btn('freeze', 'تجميد الحساب', 'no')) +
+    (access && access.callsAllowed === false
+      ? btn('allowCalls', 'السماح بالمكالمات', 'ok')
+      : btn('blockCalls', 'منع المكالمات', 'no')) +
+    btn('note', 'ملاحظة لصاحب التوصيل', 'blue') +
+    (access ? btn('clear', 'سحب المستند', 'no') : '') +
+    '</div></div>';
+  openModal({
+    title: 'تحكّم في صاحب التوصيل',
+    body,
+    foot: '<button class="modal-btn ghost" onclick="this.closest(\'.doc-lightbox\').remove()">إغلاق</button>',
+  });
+}
+
+/** إجراء واحد من لوحة التحكّم، بأسماءٍ قليلة لا دوالٍ كثيرة. */
+function accessAction(phone, action) {
+  const access = providersAccess[String(phone)] || null;
+  const close = () => {
+    const overlay = document.querySelector('.doc-lightbox');
+    if (overlay) overlay.remove();
+  };
+  if (action === 'note') {
+    close();
+    askText('ملاحظة تظهر في تطبيق صاحب التوصيل', 'لماذا مُنع أو ما المطلوب منه…', (text) => {
+      writeAccess(phone, { note: text }, 'note');
+    }, { value: access ? access.note : '', confirm: 'حفظ الملاحظة' });
+    return;
+  }
+  if (action === 'extend') {
+    // **واللوحة تُغلق قبل السؤال:** يبقى قرارٌ في شاشةٍ بعد أن نُفِّذ،
+    // فيقرأه المشرف حالةً قائمةً لا تاريخاً. والإغلاق أولًا يجعل السؤال
+    // الشاشة الوحيدة، وهو معنى «تم» التي ينتظرها.
+    close();
+    const until = nextSubscriptionEnd(access, SUB_MONTH_DAYS);
+    askConfirm(
+      'تمديد الاشتراك',
+      'يُمدّد ' + SUB_MONTH_DAYS + ' يومًا لصاحب التوصيل ' + esc(phone) +
+      '<br>إلى: <strong>' + esc(fmtDateShort(until)) + '</strong>' +
+      (access && access.frozen ? '<br><br>الحساب مجمّد: المدّة تُكتب لكن التجميد يبقى حتى ترفعه.' : ''),
+      () => {
+        writeAccess(phone, { subscriptionActive: true, subscriptionEnd: until }, 'extend');
+        // وجدول `providers` يُحدَّث معه: عمود «تاريخ الانتهاء» في القائمة
+        // يقرأ منه، فبلا هذه الكتابة يرى المشرف قرارين في شاشة واحدة.
+        mirrorProviderSubscription(phone, true, until);
+      },
+      { confirm: 'تمديد' }
+    );
+    return;
+  }
+  if (action === 'clear') {
+    close();
+    askConfirm(
+      'سحب مستند الصلاحيات',
+      'يعود الرقم إلى «بلا قرار»: يعمل بالسماح حتى تكتب اللوحة قرارًا جديدًا.',
+      async () => {
+        try {
+          await db.collection(ACCESS_COLLECTION).doc(String(phone)).delete();
+          await logActivity(ACCESS_ACTION_LABELS.clear, String(phone));
+          toast('سُحب المستند');
+          loadProviders();
+        } catch (err) { toast(err.message, true); }
+      },
+      { danger: true, confirm: 'سحب' }
+    );
+    return;
+  }
+  const patches = {
+    stop: { subscriptionActive: false },
+    start: { subscriptionActive: true },
+    freeze: { frozen: true },
+    unfreeze: { frozen: false },
+    blockCalls: { callsAllowed: false },
+    allowCalls: { callsAllowed: true },
+  };
+  const patch = patches[action];
+  if (!patch) return;
+  close();
+  if (action === 'stop') {
+    mirrorProviderSubscription(phone, false, null);
+  } else if (action === 'start') {
+    mirrorProviderSubscription(phone, true, null);
+  }
+  writeAccess(phone, patch, action);
+}
+
+/**
+ * نسخ القرار إلى `providers`: العمودان القديمان في الجدول يقرآن من هناك.
+ *
+ * **والنسخ لا النقل:** `providers` تبقى سجلّ اللوحة التاريخيّا، و
+ * `driver_access` هو ما ينفّذه الهاتف ولائحة الزبائن. فلو اختلفا كان
+ * للمشرف جوابان عن سؤال واحد، وهذا أصدق طريقٍ إلى قرارٍ يُلغى بالخطأ.
+ */
+async function mirrorProviderSubscription(phone, active, end) {
+  const p = providersState.find((x) => String(x.phone || '') === String(phone));
+  if (!p) return;
+  try {
+    const upd = { subscription_active: active === true };
+    if (end) upd.subscription_end = end;
+    await db.collection('providers').doc(p.id).set(upd, { merge: true });
+  } catch {}
+}
+
+/* ---------- قائمة تجديدات الاشتراك ---------- */
+
+let renewalsState = [];
+let renewalsFilter = 'pending';
+let renewalsAccess = {};
+
+/**
+ * يقرأ طلبات التجديد التي أرسلها أصحابُ التوصيل بعد أن دفعوا.
+ *
+ * **والفرز بعد الجلب:** `createdAt` طابعٌ من الخادم، و`orderBy` مع `where`
+ * يستدعي فهرسًا مركّبًا لا تحتاجه لوحةٌ بعشرات الأسطر. فالقراءة كلها ثم
+ * الترتيب في المتصفّح، كما في قائمة تسجيل السائقين.
+ *
+ * **والقرار معروض مع الطلب:** المشرف يعتمد الدفع وهو يرى حالة الحساب —
+ * مجمّد؟ منتهٍ من أسبوعين؟ سارٍ فيه عشرون يومًا؟ — لأن الاعتماد مدٌّ من
+ * آخر نهاية لا من اليوم، وتلك الجملة لا تُعرف إلا برؤيتها.
+ */
+async function loadRenewals() {
+  const snap = await db.collection(RENEWAL_COLLECTION).get();
+  let rows = snap.docs.map((d) => ({ id: d.id, ...d.data() }));
+  rows.sort((a, b) => millisOf(b.createdAt) - millisOf(a.createdAt));
+  if (renewalsFilter) rows = rows.filter((r) => (r.status || 'pending') === renewalsFilter);
+  renewalsState = rows;
+
+  const names = await providerNamesByPhone();
+  const phones = Array.from(new Set(rows.map((r) => String(r.phone || '')).filter(Boolean)));
+  renewalsAccess = await loadAccess(phones);
+  setSegCount('renewals-pending', snap.docs.filter((d) => (d.data().status || 'pending') === 'pending').length);
+
+  const body = $('#renewals-body');
+  if (!renewalsState.length) {
+    body.innerHTML = '<tr class="empty-row"><td colspan="8">لا تجديدات في هذه الحالة</td></tr>';
+    return;
+  }
+  body.innerHTML = renewalsState
+    .map((r) => {
+      const st = r.status || 'pending';
+      const phone = String(r.phone || '');
+      const badge = '<span class="badge ' + esc(st === 'approved' ? 'accepted' : st) + '">' +
+        esc(RENEWAL_STATUS_LABELS[st] || st) + '</span>';
+      const ref = r.reference ? '<div class="req-note">رقم العملية: ' + esc(r.reference) + '</div>' : '';
+      const note = r.review_note ? '<div class="req-note">سبب الرفض: ' + esc(r.review_note) + '</div>' : '';
+      let actions = '<div class="row-actions">';
+      if (st === 'pending') {
+        actions +=
+          '<button class="btn-sm ok" onclick="reviewRenewal(\'' + esc(r.id) + '\',\'approve\')">اعتماد وتمديد شهر</button>' +
+          '<button class="btn-sm no" onclick="reviewRenewal(\'' + esc(r.id) + '\',\'reject\')">رفض</button>';
+      }
+      actions += '<button class="btn-sm blue" onclick="openAccessPanel(\'' + esc(phone) + '\')">لوحة التحكّم</button>';
+      actions += '</div>';
+      return (
+        '<tr>' +
+        '<td style="font-size:11px;max-width:90px;overflow:hidden;text-overflow:ellipsis" title="' + esc(r.id) + '">' +
+          esc(String(r.id).substring(0, 10)) + '</td>' +
+        '<td><strong>' + esc(names[phone] || 'غير مسجّل في الجدول') + '</strong>' +
+          '<div style="direction:ltr;text-align:right;font-size:12px">' + esc(phone) + '</div></td>' +
+        '<td>' + esc(fmtMoney(r.amount)) + '</td>' +
+        '<td>' + ref + (ref ? '' : '—') + '</td>' +
+        '<td>' + fmtDate(r.createdAt) + '</td>' +
+        '<td>' + accessCell(renewalsAccess[phone]) + '</td>' +
+        '<td>' + badge + note + '</td>' +
+        '<td>' + actions + '</td>' +
+        '</tr>'
+      );
+    })
+    .join('');
+}
+
+/** أسماء أصحاب التوصيل بأرقامهم: رقم → اسم، من جدول `providers`. */
+async function providerNamesByPhone() {
+  try {
+    const snap = await db.collection('providers').get();
+    const names = {};
+    snap.docs.forEach((d) => {
+      const data = d.data() || {};
+      const phone = String(data.phone || '');
+      if (phone) names[phone] = data.name || '';
+    });
+    return names;
+  } catch {
+    return {};
+  }
+}
+
+/**
+ * اعتمادُ دفعةٍ أو رفضُها — القرار كلّه هنا، ولا قرار في التطبيق.
+ *
+ * **والاعتماد هو وحده ما يطيل الاشتراك:** لو كفى أن يكتب صاحبُ التوصيل
+ * «دفعتُ» لكان الدفعُ بيمنِ الدافع. فالطلب سطرٌ معلّق، والاعتماد كتابةٌ
+ * في `driver_access` باسم المشرف الذي ضغطه.
+ *
+ * **والرفض لا يترك الحساب معلّقًا:** سببُ الرفض يُرسَل ملاحظةً إلى
+ * تطبيقه، فيعرف أن المال لم يُقبَل ولماذا، بدل أن ينتظر شهرًا قرارًا
+ * لا يأتي.
+ */
+async function reviewRenewal(id, decision) {
+  const r = renewalsState.find((x) => x.id === id);
+  if (!r) return;
+  const phone = String(r.phone || '');
+  const access = renewalsAccess[phone] || null;
+  if (decision === 'reject') {
+    askText('سبب رفض الدفع', 'اكتب ما يصل إلى صاحب التوصيل في تطبيقه…', (reason) => {
+      finishRenewal(id, 'rejected', { review_note: reason, note: reason }, phone, null, reason);
+    }, { required: true, confirm: 'رفض' });
+    return;
+  }
+  const until = nextSubscriptionEnd(access, SUB_MONTH_DAYS);
+  askConfirm(
+    'اعتماد التجديد',
+    'صاحب التوصيل: <strong>' + esc(phone) + '</strong><br>' +
+    'المدفوع: <strong>' + esc(fmtMoney(r.amount)) + '</strong>' +
+    (r.reference ? '<br>رقم العملية: <strong>' + esc(r.reference) + '</strong>' : '') +
+    '<br><br>يُمدَّد ' + SUB_MONTH_DAYS + ' يومًا إلى: <strong>' + esc(fmtDateShort(until)) + '</strong>' +
+    (access && access.frozen ? '<br><br>الحساب مجمّد: تُمدَّد المدّة ويبقى التجميد حتى ترفعه.' : ''),
+    () => {
+      finishRenewal(id, 'approved', {}, phone, until, '');
+    },
+    { confirm: 'اعتماد' }
+  );
+}
+
+/**
+ * كتابة القرار: الطلب، ثم الصلاحية، ثم المرآة في `providers`.
+ *
+ * **والحالة تُكتب في الطلب أولًا:** لو انقطعت الشبكة بعد الطلب وقبل
+ * الصلاحية لرأى المشرف سطرًا معتمدًا بحسابٍ لم يُمَدَّ، فيعيد الاعتماد.
+ * وبالعكس — صلاحيةٌ ممدودة وطلبٌ معلّق — يمدّ الشهر مرّتين. فالأخطر هو
+ * الثاني، لذا يُكتب المدّة ثم تُعلَّم الحالة: الاعتماد مرّة واحدة في
+ * كلتا الحالتين، والفرق يبقى في يد المشرف لا في يد الشبكة.
+ */
+async function finishRenewal(id, status, extraAccess, phone, until, reason) {
+  try {
+    if (status === 'approved') {
+      await db.collection(ACCESS_COLLECTION).doc(phone).set({
+        subscriptionActive: true,
+        subscriptionEnd: until,
+        ...extraAccess,
+        updatedAt: firebase.firestore.FieldValue.serverTimestamp(),
+      }, { merge: true });
+      mirrorProviderSubscription(phone, true, until);
+    } else {
+      await db.collection(ACCESS_COLLECTION).doc(phone).set({
+        ...extraAccess,
+        updatedAt: firebase.firestore.FieldValue.serverTimestamp(),
+      }, { merge: true });
+    }
+    await db.collection(RENEWAL_COLLECTION).doc(id).update({
+      status,
+      review_note: reason,
+      reviewed_by: ADMIN.full_name,
+      reviewed_at: firebase.firestore.FieldValue.serverTimestamp(),
+    });
+    await logActivity(status === 'approved' ? 'اعتماد تجديد اشتراك' : 'رفض تجديد اشتراك', phone);
+    toast(status === 'approved'
+      ? 'تم اعتماد التجديد وتمديد الشهر'
+      : 'تم رفض الطلب ووصلت صاحبَه الملاحظة');
+    loadRenewals();
+    loadProviders();
+  } catch (err) {
+    toast(err.message, true);
+  }
+}
+
+/**
+ * توحيد الصلاحيات: مستند قرارٍ لكل صاحب توصيل ليس له واحد.
+ *
+ * **ولماذا هو ضروري؟** لأن «بلا قرار» يعني العمل بالسماح، فبقيَ من قُبل
+ * قبل هذه اللوحة خارج الحكم مكتوبًا لا مقولًا. وهذا الزرّ ينسخ حالته من
+ * `providers` إلى `driver_access` باسمها — فيصير لكلّ رقمٍ قرارٌ يُمحى
+ * ويُكتب، وتسقط الذرائع عند أول خلاف على ظهورٍ أو اتصال.
+ */
+async function backfillAccess() {
+  askConfirm(
+    'توحيد الصلاحيات',
+    'ينشئ مستند صلاحيات لكلّ صاحب توصيل لا مستند له، بنسخ قرار اللوحة الحاليّ: ' +
+    'نشطٌ أو موقوفٌ أو محظورٌ وتاريخُ انتهائه.<br><br>لا يغيّر أحدًا له مستند اليوم.',
+    async () => {
+      try {
+        const snap = await db.collection('providers').get();
+        const rows = snap.docs.map((d) => ({ id: d.id, ...(d.data() || {}) }));
+        const phones = rows.map((p) => String(p.phone || '').trim()).filter(Boolean);
+        const existing = await loadAccess(phones);
+        const batch = db.batch();
+        let created = 0;
+        rows.forEach((p) => {
+          const phone = String(p.phone || '').trim();
+          if (!phone || existing[phone]) return;
+          batch.set(db.collection(ACCESS_COLLECTION).doc(phone), {
+            subscriptionActive: p.subscription_active !== false,
+            subscriptionEnd: p.subscription_end || null,
+            frozen: p.blocked === true,
+            callsAllowed: true,
+            note: '',
+            migrated_from: 'providers',
+            updatedAt: firebase.firestore.FieldValue.serverTimestamp(),
+          });
+          created++;
+        });
+        if (!created) {
+          toast('كل أصحاب التوصيل لهم قرارٌ مكتوب بالفعل');
+          return;
+        }
+        await batch.commit();
+        await logActivity('توحيد صلاحيات أصحاب التوصيل', created + ' رقمًا');
+        toast('كُتبت قرارات لـ' + created + ' صاحب توصيل');
+        loadProviders();
+      } catch (err) {
+        toast(err.message, true);
+      }
+    },
+    { confirm: 'توحيد' }
+  );
 }
 
 /* ---------- Customers ---------- */
@@ -3355,8 +3859,16 @@ document.querySelectorAll('#driverreq-seg .seg-btn').forEach((b) =>
   })
 );
 
-/* فلاتر سجل المكالمات: التصفية من الذاكرة، فلا إعادة قراءة للقاعدة. */
-document.querySelectorAll('#calls-seg .seg-btn').forEach((b) =>
+document.querySelectorAll('#renewals-seg .seg-btn').forEach((b) =>
+  b.addEventListener('click', () => {
+    document.querySelectorAll('#renewals-seg .seg-btn').forEach((x) => x.classList.remove('active'));
+    b.classList.add('active');
+    renewalsFilter = b.dataset.status;
+    loadRenewals();
+  })
+);
+
+/* فلاتر سجل المكالمات: التصفية من الذاكرة، فلا إعادة قراءة للقاعدة. */document.querySelectorAll('#calls-seg .seg-btn').forEach((b) =>
   b.addEventListener('click', () => {
     document.querySelectorAll('#calls-seg .seg-btn').forEach((x) => x.classList.remove('active'));
     b.classList.add('active');
