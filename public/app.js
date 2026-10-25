@@ -34,6 +34,38 @@ function isOwner() { return myRole() === 'owner'; }
 function canWrite() { return myRole() !== 'viewer'; }
 function myUid() { return String((ADMIN && (ADMIN.uid || ADMIN.id)) || ''); }
 
+/*
+ * **خاناتُ بحثٍ للجداول، كلها من الذاكرة:** الجداولُ تُقرأ مرّة، فكلُّ حرفٍ
+ * يكتبه المشرف لا يستحقُّ رحلةً إلى القاعدة. والتشكيلُ يُجرَّد منه الطرفان
+ * لأنَّ الأسماءَ في الجدول تُكتب بأوجهٍ مختلفة والبحثَ بيد رجلٍ على لوحة
+ * هاتف: من بحثَ عن «محمد» لا يُعقل أن يُخيبَه اسمٌ مكتوب «محمّد».
+ */
+const searchText = {};
+
+const SEARCH_IGNORED = /[\u064B-\u065F\u0670\u0640\u200B-\u200F]/g;
+
+function normSearch(s) {
+  return String(s || '').replace(SEARCH_IGNORED, '').trim().toLowerCase();
+}
+
+/** `parts` حقولُ السطر تُقرأ منها جميعًا: اسمٌ أو رقمٌ أو معرّف. */
+function searchHit(view, parts) {
+  const q = normSearch(searchText[view]);
+  if (!q) return true;
+  return normSearch(Array.isArray(parts) ? parts.join(' ') : parts).indexOf(q) >= 0;
+}
+
+function bindSearch(domId, view, rerender) {
+  const el = document.getElementById(domId);
+  if (!el) return;
+  let t = null;
+  el.addEventListener('input', () => {
+    searchText[view] = el.value;
+    clearTimeout(t);
+    t = setTimeout(rerender, 200);
+  });
+}
+
 /**
  * البوابةُ الوحيدة للأفعال: تُسكت الفعلَ وتقول سببَه بصوتٍ واحد، فلا يبقى
  * زرٌّ يعمل لرجلٍ ولا يعمل لآخر بلا أن يُقال له.
@@ -75,6 +107,22 @@ const RIGHT_OF = {
   deleteAllRequests: 'write',
   saveProvider: 'write',
   deleteProvider: 'write',
+  addProvider: 'write',
+  deleteCallRecord: 'write',
+  deleteTrip: 'write',
+  callTripDriver: 'write',
+  callbackTarget: 'write',
+  deleteActivityLine: 'write',
+  clearActivity: 'owner',
+  createAdmin: 'owner',
+  grantTrialSelected: 'write',
+  grantPaidSelected: 'write',
+  stopSubscriptionSelected: 'write',
+  freezeSelected: 'write',
+  unfreezeSelected: 'write',
+  blockCallsSelected: 'write',
+  allowCallsSelected: 'write',
+  deleteSelectedProviders: 'write',
   addOrder: 'write',
   editOrder: 'write',
   deleteOrder: 'write',
@@ -125,12 +173,16 @@ function applyRoleChrome() {
     const ownerOnly = v === 'settings' || v === 'admins';
     b.style.display = ownerOnly && !isOwner() ? 'none' : '';
   });
+  // **وللمطالع تُسحب أدواتُ الجماعة:** زرٌّ يعرف سلفًا أنه سيُرفض عند
+  // الضغط يعلّم الرجلَ أن اللوحة معطوبة، لا أن درجتَه هي كذلك.
+  const bulk = document.getElementById('providers-bulk-bar');
+  if (bulk) bulk.style.display = canWrite() ? '' : 'none';
 }
 
 /* ---------- إعدادات المكالمات: بروتوكول التطبيق نفسه ---------- */
 const CALL_ADMIN_ID = 'admin';
 const RING_TIMEOUT_MS = 60000;
-const RUN_SHA = 'v20261025-9';
+const RUN_SHA = 'v20261025-10';
 
 /// مستند الإشارة: الاسم نفسه الذي يقرؤه `call_service_inapp.dart` في الجوّال.
 const SIGNAL_COLLECTION = 'call_signal';
@@ -1018,11 +1070,15 @@ function renderCallsTable() {
       ' | WebRTC: ' + (typeof RTCPeerConnection !== 'undefined' ? 'متاح' : 'غير متاح') +
       ' | الإشارة: ' + SIGNAL_COLLECTION;
   }
-  const rows = !callsFilter
+  let rows = !callsFilter
     ? callsState
     : callsState.filter((c) => c.status === callsFilter);
+  rows = rows.filter((c) =>
+    searchHit('calls', [c.callerName, c.callerPhone, c.calleeName, c.calleePhone, c.id])
+  );
   if (!rows.length) {
-    tbody.innerHTML = '<tr><td colspan="8" class="empty-cell">لا توجد مكالمات بعد</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="8" class="empty-cell">' +
+      (callsState.length ? 'لا نتيجة لهذا البحث' : 'لا توجد مكالمات بعد') + '</td></tr>';
     return;
   }
   tbody.innerHTML = '';
@@ -1054,6 +1110,9 @@ function renderCallsTable() {
       (c.status === 'missed' || c.status === 'declined'
         ? '<button class="btn-sm ok" onclick="callbackTarget(\'' + esc(c.id) + '\')">إعادة الاتصال</button>'
         : '') +
+      (!live && canWrite()
+        ? '<button class="btn-sm no" onclick="deleteCallRecord(\'' + esc(c.id) + '\')">حذف</button>'
+        : '') +
       '</div></td>';
     tbody.appendChild(tr);
   });
@@ -1068,6 +1127,39 @@ function callbackTarget(callId) {
   const name = isIncoming ? c.callerName : c.calleeName;
   const role = isIncoming ? c.callerRole : c.calleeRole;
   openNewCallModal({ phone: phone, name: name, role: role });
+}
+
+/*
+ * **والحذفُ للمنتهي وحده:** المكالمةُ الحيّةُ تُوقَف ولا تُمحى — الفرقُ أن
+ * الإيقافَ قرارٌ يراه الرجلُ وهو في الخط، والحذفَ ورقةٌ تُشَقّ من بعده.
+ * فتمحُو سطرًا جارٍ معناه أن اللوحة أنكرت مكالمةً يعمل عليها صاحبُها.
+ */
+function deleteCallRecord(callId) {
+  const c = callsState.find((x) => x.id === callId);
+  if (!c) return toast('لا يوجد هذا السطر', true);
+  if (c.status === 'ongoing' || c.status === 'ringing') {
+    return toast('مكالمةٌ لم تنتهِ بعد: أوقفها أولًا ثم احذف أثرها', true);
+  }
+  askConfirm(
+    'حذف سطر من سجل المكالمات',
+    'يُمحى سجلُّ مكالمة <strong>' +
+    esc(c.callerName || c.callerPhone || c.callerId || '—') + ' ← ' +
+    esc(c.calleeName || c.calleePhone || c.calleeId || '—') + '</strong> ' +
+    'المؤرَّخة ' + esc(c.createdAt ? fmtDate(c.createdAt) : 'بلا تاريخ') +
+    '. محوٌ نهائي لا رجعة فيه، ولا يمسّ ما سُجِّل في «سجل التواصل».',
+    async () => {
+      try {
+        await db.collection('calls').doc(String(callId)).delete();
+        await logActivity(
+          'حذف سجل مكالمة',
+          (c.callerPhone || c.callerId || '?') + ' ← ' + (c.calleePhone || c.calleeId || '?')
+        );
+        toast('حُذف السطر');
+        loadCalls();
+      } catch (err) { toast(err.message, true); }
+    },
+    { danger: true, confirm: 'حذف نهائي' }
+  );
 }
 
 /* ---------- الاستماع ---------- */
@@ -1283,11 +1375,15 @@ function renderTrips() {
   const body = $('#trips-body');
   if (!body) return;
   renderTripsSummary();
-  if (!tripsState.length) {
-    body.innerHTML = '<tr><td colspan="6" class="empty-cell">لا تواصل مسجّل لهذا الزبون</td></tr>';
+  const rows = tripsState.filter((t) =>
+    searchHit('trips', [t.driverName, t.driverPhone, t.channel, t.id])
+  );
+  if (!rows.length) {
+    body.innerHTML = '<tr><td colspan="6" class="empty-cell">' +
+      (tripsState.length ? 'لا نتيجة لهذا البحث' : 'لا تواصل مسجّل لهذا الزبون') + '</td></tr>';
     return;
   }
-  body.innerHTML = tripsState.map((t, i) => {
+  body.innerHTML = rows.map((t, i) => {
     const meta = TRIP_CHANNEL_META[t.channel] || { label: t.channel || 'غير معروفة', cls: 'offline' };
     const name = t.driverName || t.driverPhone || '—';
     const avatar = t.driverPhoto
@@ -1306,6 +1402,9 @@ function renderTrips() {
       '<td><span class="badge ' + meta.cls + '">' + esc(meta.label) + '</span></td>' +
       '<td><div class="row-actions">' +
       '<button class="btn-sm ok" onclick="callTripDriver(\'' + esc(t.driverPhone || '') + '\',\'' + esc(t.driverName || '') + '\')">اتصل به</button>' +
+      (canWrite()
+        ? '<button class="btn-sm no" onclick="deleteTrip(\'' + esc(t.id) + '\')">حذف</button>'
+        : '') +
       '</div></td>' +
       '</tr>';
   }).join('');
@@ -1315,6 +1414,33 @@ function renderTrips() {
 function callTripDriver(phone, name) {
   if (!phone) { toast('هذه الرحلة بلا رقم صاحب توصيل.', true); return; }
   openNewCallModal({ phone: phone, name: name, role: 'driver' });
+}
+
+/**
+ * سطرُ التواصل داخل ملفّ الزبون نفسه، فحذفُهُ من هناك لا من جدولٍ مستقلّ:
+ * من ظنّ أنه محا سطرًا في اللوحة فقط أبقي أثرًا لا يراه وهو يظنّه زال.
+ */
+function deleteTrip(tripId) {
+  const phone = $('#trips-customer') ? $('#trips-customer').value : '';
+  if (!phone) return toast('اختر الزبون أولًا، فالسطرُ في ملفّه هو لا في مكانٍ آخر', true);
+  const t = tripsState.find((x) => x.id === tripId);
+  if (!t) return toast('لا يوجد هذا السطر', true);
+  askConfirm(
+    'حذف سطر من سجل التواصل',
+    'يُمحى من ملفّ الزبون <strong style="direction:ltr">' + esc(phone) + '</strong> أثرُ تواصله مع ' +
+    '<strong>' + esc(t.driverName || t.driverPhone || '—') + '</strong> ' +
+    'المؤرَّخ ' + esc(t.createdAt ? fmtDate(t.createdAt) : 'بلا تاريخ') + '. محوٌ نهائي لا رجعة فيه.',
+    async () => {
+      try {
+        await db.collection('customers').doc(String(phone))
+          .collection('trips').doc(String(tripId)).delete();
+        await logActivity('حذف سجل تواصل', phone + ' · ' + (t.driverPhone || t.driverName || ''));
+        toast('حُذف السطر');
+        loadTrips();
+      } catch (err) { toast(err.message, true); }
+    },
+    { danger: true, confirm: 'حذف نهائي' }
+  );
 }
 
 /* ---------- الدخول ---------- */
@@ -1627,6 +1753,118 @@ function claimOwner() {
   );
 }
 
+/* ---------- مشرفٌ تُنشئه اللوحةُ بيدِ المالك ---------- */
+
+/*
+ * **الطريقُ الطويل يبقى كما هو:** أن يُنشئ الرجلُ حسابَه من شاشة الدخول
+ * ثم يطلب صلاحيةً ثم تقبلها — وهذا سبيلُه حين يكون بعيدًا. أمّا إذا كان
+ * في المكتب وتحتاج أن يعمل اليوم فلا معنى أن تنتظر أن يضغط هو زرًّا.
+ *
+ * **ولماذا تطبيقُ حساباتٍ ثانٍ؟** لأنَّ إنشاءَ حسابٍ في جلسة اللوحة نفسها
+ * يُخرج المالكَ من دخوله ويُجلس مكانه الرجلَ الجديد. فالتطبيقُ الثاني
+ * يُنشئ ثم يخرج، ويُقالُ له «لا تخزّن» حتى لا يمسَّ أثرَ جلسة المالك
+ * المحفوظة في المتصفّح — وبعده تُتحقَّق اللوحةُ أن صاحبها لم يخرج.
+ */
+const PROVISIONER_APP = 'hamada-admin-provisioner';
+const provisionerReady = {};
+
+async function provisionerAuth() {
+  const list = Array.isArray(firebase.apps) ? firebase.apps : [];
+  const app = list.find((a) => a.name === PROVISIONER_APP) ||
+    firebase.initializeApp(firebase.app().options, PROVISIONER_APP);
+  const pa = app.auth();
+  if (!provisionerReady[PROVISIONER_APP]) {
+    await pa.setPersistence(firebase.auth.Auth.Persistence.NONE);
+    provisionerReady[PROVISIONER_APP] = true;
+  }
+  return pa;
+}
+
+/**
+ * بريدٌ لا صندوقَ خلفه.
+ *
+ * **وهذا هو جوابُ سؤال «رابط كلمة المرور»:** الحسابُ الذي في داخله بريدٌ
+ * صنعه النظامُ لاسمٍ ثابت لا يملكه رجل — الرسالةُ تُرسَل ولا تصل إلى أحد.
+ * فالزرُّ صحيحُ الصنعة على هذا البريد وهمٌّ على ذاك، واللوحةُ تقول ذلك
+ * بدل أن تُخبره أن الرابطَ أُرسل.
+ */
+function isVirtualAdminEmail(email) {
+  const e = String(email || '').trim().toLowerCase();
+  return !e || e.endsWith('@tawsil.app');
+}
+
+function createAdmin() {
+  const overlay = openModal({
+    title: 'إنشاء مشرفٍ بيدك',
+    body:
+      '<div style="display:grid;gap:10px">' +
+      '<label>الاسم في اللوحة</label><input id="ca-name" type="text" class="modal-input">' +
+      '<label>بريده الحقيقي</label><input id="ca-email" type="email" class="modal-input" style="direction:ltr" autocomplete="off">' +
+      '<label>كلمة سرٍّ مؤقّتة</label><input id="ca-pass" type="text" class="modal-input" style="direction:ltr" autocomplete="off">' +
+      '<label>درجتُه</label><select id="ca-role" class="modal-input">' +
+      ['admin', 'viewer'].map((r) =>
+        '<option value="' + r + '">' + ROLE_LABELS[r] + '</option>').join('') +
+      '</select>' +
+      '<p class="login-sub">أعطِه الكلمةَ المؤقّتة وقل له يغيّرها من «الإعدادات» بعد أول دخول. ' +
+      '<strong>والبريدُ يجب أن يكون حقيقيًا:</strong> إن ضاعت كلمتُه فإنما يُرسَل رابطُ التعيين إلى بريده، ' +
+      'فلا يُنشَأ حسابٌ ببريدٍ لا صندوق خلفه. ولا تُمنح من هنا درجةُ المالك: المالكُ واحدٌ في النظام.</p>' +
+      '</div>',
+    foot:
+      '<button class="modal-btn ghost" data-close>إلغاء</button>' +
+      '<button class="modal-btn ok" data-submit>إنشاءٌ ومنحُ الصفة</button>',
+  });
+  overlay.querySelector('[data-close]').addEventListener('click', () => overlay.remove());
+  overlay.querySelector('[data-submit]').addEventListener('click', () => submitNewAdmin(overlay));
+}
+
+async function submitNewAdmin(overlay) {
+  const name = overlay.querySelector('#ca-name').value.trim();
+  const email = overlay.querySelector('#ca-email').value.trim();
+  const pass = overlay.querySelector('#ca-pass').value;
+  const role = roleOf({ role: overlay.querySelector('#ca-role').value });
+  const btn = overlay.querySelector('[data-submit]');
+  if (!name || !email || !pass) return toast('الاسمُ والبريدُ والكلمةُ ثلاثةٌ مطلوبة', true);
+  if (pass.length < 6) return toast('كلمة السرّ: ستّةُ محارف فأكثر', true);
+  if (isVirtualAdminEmail(email)) {
+    return toast('هذا بريدُ اللوحة الداخليّ لا بريدُ رجل: اكتب بريدَه الحقيقي', true);
+  }
+  const before = auth.currentUser ? auth.currentUser.uid : '';
+  btn.disabled = true;
+  try {
+    const pa = await provisionerAuth();
+    const cred = await pa.createUserWithEmailAndPassword(email, pass);
+    const uid = cred.user.uid;
+    // والصفةُ تُكتب من جلسة المالك — فاللوحةُ هي التي تقرّر لا الحسابُ الجديد.
+    await db.collection('admins').doc(uid).set({
+      uid: uid,
+      email: email,
+      username: email,
+      full_name: name,
+      role: role,
+      added_by: String((ADMIN && (ADMIN.full_name || ADMIN.username)) || ''),
+      createdAt: firebase.firestore.FieldValue.serverTimestamp(),
+    });
+    await pa.signOut();
+    overlay.remove();
+    await logActivity('إنشاء مشرف بيد المالك', name + ' · ' + ROLE_LABELS[role]);
+    toast('أُنجز: «' + name + '» بدرجة ' + ROLE_LABELS[role]);
+    loadAdmins();
+    // **ودخولُ المالك لا يُمسّ:** لو خرج من جلسته وهو لا يدري لضاع عمله
+    // نصفَ منجَزٍ وظنّ أن اللوحة معطوبة.
+    if (auth.currentUser && auth.currentUser.uid === before) return;
+    toast('أُنجز الحساب، لكن وجب عليك أن تدخل إلى اللوحة من جديد', true);
+  } catch (err) {
+    btn.disabled = false;
+    toast(err.code === 'auth/email-already-in-use'
+      ? 'هذا البريد له حسابٌ بالفعل: امنحه الصفةَ من قائمة المشرفين أو اطلب منه أن يدخل'
+      : err.code === 'auth/invalid-email'
+        ? 'البريد غيرُ صحيح الشكل'
+        : err.code === 'auth/weak-password'
+          ? 'كلمة المرور ضعيفة: ستّةُ محارف فأكثر'
+          : 'تعذّر الإنشاء: ' + err.message, true);
+  }
+}
+
 /**
  * كلمةُ سرٍّ لا تعرفها اللوحة: تُرسَل رسالةُ تعيينٍ من Firebase إلى بريد
  * المشرف. واللوحةُ التي تخزّن كلمةَ سرٍّ في جدولٍ يقرؤه كلُّ مشرفٍ قد
@@ -1638,6 +1876,13 @@ async function resetAdminPassword(uid) {
     if (!doc.exists) return toast('لا يوجد هذا المشرف', true);
     const email = String(doc.data().email || '');
     if (!email) return toast('لا بريد مسجَّل لهذا المشرف', true);
+    if (isVirtualAdminEmail(email)) {
+      return toast(
+        'لا صندوقَ بريد خلف هذا الحساب: الرابطُ يُرسَل ولا يصل إلى أحد. ' +
+        'أنشئ له حسابًا ببريدٍ حقيقي ثم أرسل الرابطَ إليه.',
+        true
+      );
+    }
     askConfirm(
       'إعادة تعيين كلمة المرور',
       'يُرسل النظامُ رسالةً إلى <strong style="direction:ltr">' + esc(email) + '</strong> ' +
@@ -1954,12 +2199,20 @@ async function loadRequests() {
   const rows = snap.docs.map(d => ({ id: d.id, ...d.data() }));
   if (requestsFilter) requestsState = rows.filter(r => r.status === requestsFilter);
   else requestsState = rows;
+  renderRequests();
+}
+
+/** رسمُ قائمة الأوراق وحده: البحثُ والتصفيةُ لا يُعيدان قراءة القاعدة. */
+function renderRequests() {
   const body = $('#requests-body');
-  if (!requestsState.length) {
-    body.innerHTML = '<tr class="empty-row"><td colspan="8">لا توجد طلبات</td></tr>';
+  if (!body) return;
+  const rows = requestsState.filter((r) => searchHit('requests', [r.name, r.phone, r.id]));
+  if (!rows.length) {
+    body.innerHTML = '<tr class="empty-row"><td colspan="8">' +
+      (requestsState.length ? 'لا نتيجة لهذا البحث' : 'لا توجد طلبات') + '</td></tr>';
     return;
   }
-  body.innerHTML = requestsState
+  body.innerHTML = rows
     .map((r) => {
       let docs = [];
       if (Array.isArray(r.documents)) docs = r.documents;
@@ -2331,13 +2584,23 @@ async function loadDriverRequests() {
   rows.sort((a, b) => millisOf(b.createdAt) - millisOf(a.createdAt));
   if (driverReqFilter) rows = rows.filter(r => r.status === driverReqFilter);
   driverReqState = rows;
+  driverReqProfiles = profiles;
+  renderDriverRequests();
+}
 
+let driverReqProfiles = {};
+
+/** رسمُ قائمة التسجيل وحده: الاسمُ المعدَّل والصورةُ من ملفّ صاحبه. */
+function renderDriverRequests() {
   const body = $('#driverreq-body');
-  if (!driverReqState.length) {
-    body.innerHTML = '<tr class="empty-row"><td colspan="7">لا توجد طلبات تسجيل</td></tr>';
+  if (!body) return;
+  const rows = driverReqState.filter((r) => searchHit('driverreq', [r.name, r.phone, r.id]));
+  if (!rows.length) {
+    body.innerHTML = '<tr class="empty-row"><td colspan="7">' +
+      (driverReqState.length ? 'لا نتيجة لهذا البحث' : 'لا توجد طلبات تسجيل') + '</td></tr>';
     return;
   }
-  body.innerHTML = driverReqState
+  body.innerHTML = rows
     .map((r) => {
       const st = r.status || 'pending';
       const badge = '<span class="badge ' + esc(st) + '">' +
@@ -2376,7 +2639,7 @@ async function loadDriverRequests() {
       // **الاسم المعدَّل والصورة من ملفّه الشخصي:** يُفضَّل اسم الملفّ إن
       // وُجد، وإلا اسم الطلب. والصورة في دائرة كجدول الزبائن، وبديلها
       // الحرف الأول.
-      const prof = profiles[r.id] || {};
+      const prof = driverReqProfiles[r.id] || {};
       const dispName = (typeof prof.name === 'string' && prof.name.trim()) ? prof.name : r.name;
       return (
         '<tr>' +
@@ -3118,10 +3381,9 @@ function handoverCell(handover) {
 async function loadProviders() {
   const snap = await db.collection('providers').get();
   providersState = snap.docs.map(d => ({ id: d.id, ...d.data() }));
-  const body = $('#providers-body');
   if (!providersState.length) {
     setAccessSummary(0, 0);
-    body.innerHTML = '<tr class="empty-row"><td colspan="10">لا يوجد أصحاب توصيل</td></tr>';
+    renderProviders();
     return;
   }
   // **ظهورهم للزبائن من `driver_public`:** أرقامٌ مفتّحة على مستنداتها،
@@ -3141,9 +3403,46 @@ async function loadProviders() {
     (p) => accessIsVisible(providersAccess[String(p.phone || '')])
   ).length;
   setAccessSummary(providersState.length, shown);
-  body.innerHTML = providersState
+  providersMaps = { presence: presence, handovers: handovers };
+  renderProviders();
+}
+
+let providersMaps = { presence: {}, handovers: {} };
+
+/**
+ * رسمُ جدول أصحاب التوصيل وحده.
+ *
+ * **والرسمُ منفصلٌ عن القراءة لأمرين:** البحثُ في الاسم لا يجوز أن يُعيد
+ * قراءةَ الحضور والإحداثيات من القاعدة، والتحديدُ للجماعة يجب أن يبقى
+ * محفوظًا وهو يقلّب الصفحات — فلو كُتب الجدولُ كلَّ مرّة من الصفر لضاع
+ * من حدّد المشرفُ نصفَهم ثم بحث عن حيٍّ آخر.
+ */
+function renderProviders() {
+  const body = $('#providers-body');
+  if (!body) return;
+  if (!providersState.length) {
+    body.innerHTML = '<tr class="empty-row"><td colspan="11">لا يوجد أصحاب توصيل</td></tr>';
+    updatePickCount();
+    return;
+  }
+  const rows = providersState.filter((p) =>
+    searchHit('providers', [p.name, p.phone, p.plate, p.id])
+  );
+  if (!rows.length) {
+    body.innerHTML = '<tr class="empty-row"><td colspan="11">لا نتيجة لهذا البحث</td></tr>';
+    updatePickCount();
+    return;
+  }
+  body.innerHTML = rows
     .map((p) =>
       '<tr>' +
+      '<td class="pick-cell">' +
+      (p.phone
+        ? '<input type="checkbox" class="prov-pick" data-phone="' + esc(p.phone) + '" ' +
+          (providersSelection.has(String(p.phone)) ? 'checked ' : '') +
+          'onchange="toggleProviderPick(this)" title="تحديد">'
+        : '') +
+      '</td>' +
       '<td style="max-width:70px">' +
       (p.photo
         ? '<img class="prov-avatar" src="data:image/jpeg;base64,' + esc(p.photo) + '" onclick="openDocImage(this.src,\'' + esc(p.name) + '\')" style="width:38px;height:38px;border-radius:50%;object-fit:cover;cursor:pointer" title="' + esc(p.id) + '">'
@@ -3153,8 +3452,8 @@ async function loadProviders() {
       (p.blocked ? ' <span class="badge rejected">محظور</span>' : '') +
       '</td>' +
       '<td>' + esc(p.phone) + '</td>' +
-      '<td>' + presenceCell(presence[String(p.phone)]) + '</td>' +
-      '<td>' + handoverCell(handovers[String(p.phone)]) + '</td>' +
+      '<td>' + presenceCell(providersMaps.presence[String(p.phone)]) + '</td>' +
+      '<td>' + handoverCell(providersMaps.handovers[String(p.phone)]) + '</td>' +
       '<td>' + esc(p.plate || '') + '</td>' +
       '<td>★ ' + esc(p.rating || 0) + '</td>' +
       '<td>' + accessEndCell(providersAccess[String(p.phone)]) + '</td>' +
@@ -3170,6 +3469,308 @@ async function loadProviders() {
       '</tr>'
     )
     .join('');
+  updatePickCount();
+}
+
+/* ---------- تحديدُ الجماعة: قرارٌ واحدٌ بضغطةٍ لعدةِ أرقام ---------- */
+
+/*
+ * **والتحديدُ بالرقم لا بمعرّف الجدول:** بطاقةُ القرار مكتوبةٌ بالرقم في
+ * `driver_access`، فلو حُدِّد بالمعرّف لاحتاج كلُّ رقمٍ قراءةً ثانية قبل
+ * الكتابة. والرقمُ هو الجسرُ نفسه بين اللوحة والهاتف.
+ *
+ * **و«لبعضهم» أصلٌ لا فرع:** المحدَّدون هم ما ظهر في الجدول، فمن بحثَ عن
+ * حيٍّ ثم ضغط «حدِّد الكل» ثم «تجريبية للمحدَّدين» منحَ ذلك الحيَّ كلَّه
+ * بضغطة — وهو المطلوبُ حرفيًّا: الجميعُ دفعة، أو بعضهم، أو واحدٌ وحده من
+ * لوحةِ تحكّمه.
+ */
+const providersSelection = new Set();
+
+function toggleProviderPick(box) {
+  const phone = String(box.dataset.phone || '');
+  if (!phone) return;
+  if (box.checked) providersSelection.add(phone);
+  else providersSelection.delete(phone);
+  syncPickAllBox();
+  updatePickCount();
+}
+
+function pickAllProviders(box) {
+  document.querySelectorAll('.prov-pick').forEach((b) => {
+    b.checked = box.checked;
+    const phone = String(b.dataset.phone || '');
+    if (!phone) return;
+    if (box.checked) providersSelection.add(phone);
+    else providersSelection.delete(phone);
+  });
+  updatePickCount();
+}
+
+/** كلُّ من لا يظهر للزبائن الآن — وهي الضغطةُ التي تلي «توحيد الصلاحيات». */
+function pickInvisibleProviders() {
+  let n = 0;
+  document.querySelectorAll('.prov-pick').forEach((b) => {
+    const phone = String(b.dataset.phone || '');
+    if (!phone || accessIsVisible(providersAccess[phone])) return;
+    b.checked = true;
+    providersSelection.add(phone);
+    n += 1;
+  });
+  syncPickAllBox();
+  updatePickCount();
+  toast(n ? 'حُدِّد ' + n + ' لا يظهرون للزبائن' : 'كلُّ من في العرض ظاهرٌ للزبائن');
+}
+
+function clearProviderPicks() {
+  document.querySelectorAll('.prov-pick').forEach((b) => { b.checked = false; });
+  providersSelection.clear();
+  syncPickAllBox();
+  updatePickCount();
+}
+
+function syncPickAllBox() {
+  const all = document.getElementById('providers-pick-all');
+  if (!all) return;
+  const boxes = Array.from(document.querySelectorAll('.prov-pick'));
+  all.checked = boxes.length > 0 && boxes.every((b) => b.checked);
+}
+
+function updatePickCount() {
+  const el = document.getElementById('providers-pick-count');
+  if (!el) return;
+  el.className = 'badge ' + (providersSelection.size ? 'pending' : 'inactive');
+  el.textContent = providersSelection.size
+    ? providersSelection.size + ' محدد'
+    : 'لا أحد محدد';
+}
+
+function requireSelection() {
+  const phones = Array.from(providersSelection).filter(Boolean);
+  if (!phones.length) {
+    toast('حدّد أحدًا أولًا: لا يُكتب قرارٌ لغيرِ اسم', true);
+    return null;
+  }
+  return phones;
+}
+
+/**
+ * قرارُ الجماعة: ولكلِّ رقمٍ عدُّه الخاص.
+ *
+ * **والعدُّ من آخر نهايةٍ سارية:** كُتب للجميع تاريخٌ واحد لأُهديَ لمن بقي
+ * له عشرون يومًا شهرٌ كامل، وخُصمَ عن غيره في اللحظة نفسها. فالكتابةُ على
+ * بطاقاتٍ مختلفة التاريخ هي التي تجعل «شهرٌ للجميع» قرارًا منصفًا.
+ */
+async function bulkAccessWrite(phones, makePatch, actionLabel, mirrorActive) {
+  try {
+    const prev = await loadAccess(phones);
+    const ops = [];
+    const ends = {};
+    phones.forEach((phone) => {
+      const patch = makePatch(phone, prev[phone] || null);
+      if (!patch) return;
+      if (patch.subscriptionEnd) ends[phone] = patch.subscriptionEnd;
+      ops.push({
+        ref: db.collection(ACCESS_COLLECTION).doc(phone),
+        data: Object.assign({}, patch, {
+          updatedAt: firebase.firestore.FieldValue.serverTimestamp(),
+        }),
+        opts: { merge: true },
+      });
+    });
+    if (!ops.length) return toast('لم يُكتب شيء', true);
+    await commitInChunks(ops);
+    if (mirrorActive !== undefined && mirrorActive !== null) {
+      await Promise.all(phones.map((phone) =>
+        mirrorProviderSubscription(phone, mirrorActive, ends[phone] || null)));
+    }
+    await logActivity(actionLabel, phones.length + ' صاحب توصيل');
+    toast('نُفِّذ على ' + ops.length + ' صاحب توصيل');
+    clearProviderPicks();
+    loadProviders();
+  } catch (err) {
+    toast(err.message, true);
+  }
+}
+
+/** كم يومًا؟ الفراغُ يعني الافتراضي، والعددُ من واحدٍ إلى ثلاثمئةٍ وخمسةٍ وستّين. */
+function askGrantDays(title, onDays) {
+  askText(title, 'كم يومًا؟ (الافتراضي ' + TRIAL_DEFAULT_DAYS + ')', (text) => {
+    const raw = parseInt(String(text).replace(/[^0-9]/g, ''), 10);
+    onDays(!raw ? TRIAL_DEFAULT_DAYS : Math.max(1, Math.min(365, raw)));
+  }, { confirm: 'منح' });
+}
+
+function grantTrialSelected() {
+  const phones = requireSelection();
+  if (!phones) return;
+  askGrantDays('منح فترة تجريبية لـ' + phones.length + ' صاحب توصيل', (days) => {
+    bulkAccessWrite(
+      phones,
+      (phone, access) => ({
+        subscriptionActive: true,
+        subscriptionEnd: nextSubscriptionEnd(access, days),
+        plan: 'trial',
+        history: grantHistory(access, days, 'trial'),
+      }),
+      'منح فترة تجريبية للمحدَّدين · ' + days + ' يومًا',
+      true
+    );
+  });
+}
+
+function grantPaidSelected() {
+  const phones = requireSelection();
+  if (!phones) return;
+  askGrantDays('تمديد اشتراكٍ مدفوع لـ' + phones.length + ' صاحب توصيل', (days) => {
+    bulkAccessWrite(
+      phones,
+      (phone, access) => ({
+        subscriptionActive: true,
+        subscriptionEnd: nextSubscriptionEnd(access, days),
+        plan: 'paid',
+        history: grantHistory(access, days, 'paid'),
+      }),
+      'تمديد اشتراك مدفوع للمحدَّدين · ' + days + ' يومًا',
+      true
+    );
+  });
+}
+
+function stopSubscriptionSelected() {
+  const phones = requireSelection();
+  if (!phones) return;
+  askConfirm(
+    'إيقاف اشتراك المحدَّدين',
+    'يُطفأ مفتاحُ الاشتراك عن <strong>' + phones.length + '</strong> صاحب توصيل: تبقى تواريخُهم كما هي ' +
+    'ولا ظهورَ لهم عند الزبائن حتى تعيد التفعيل أو تمنحهم مدةً جديدة.',
+    () => bulkAccessWrite(phones, () => ({ subscriptionActive: false }),
+      'إيقاف اشتراك المحدَّدين', false),
+    { danger: true, confirm: 'إيقاف' }
+  );
+}
+
+function freezeSelected() {
+  const phones = requireSelection();
+  if (!phones) return;
+  askConfirm(
+    'تجميد حسابات المحدَّدين',
+    'يُجمَّد <strong>' + phones.length + '</strong> صاحب توصيل: لا يظهر للزبائن ولا تُجدي معه مدةٌ سارية، ' +
+    'ورفعُ التجميد قرارٌ آخر بيدك. والمددُ المكتوبة لا تُمسح بالتجميد.',
+    () => bulkAccessWrite(phones, () => ({ frozen: true }),
+      'تجميد حسابات المحدَّدين', null),
+    { danger: true, confirm: 'تجميد' }
+  );
+}
+
+function unfreezeSelected() {
+  const phones = requireSelection();
+  if (!phones) return;
+  bulkAccessWrite(phones, () => ({ frozen: false }), 'رفع التجميد عن المحدَّدين', null);
+}
+
+function blockCallsSelected() {
+  const phones = requireSelection();
+  if (!phones) return;
+  askConfirm(
+    'منع مكالمات المحدَّدين',
+    'لا يظهر <strong>' + phones.length + '</strong> صاحب توصيل في قائمة القريبين ولو كان اشتراكُه ساريًا: ' +
+    'المنعُ إخفاءٌ لا نصفُ ظهور، وهذا ما يقرؤه الهاتفُ حرفيًّا.',
+    () => bulkAccessWrite(phones, () => ({ callsAllowed: false }),
+      'منع مكالمات المحدَّدين', null),
+    { danger: true, confirm: 'منع' }
+  );
+}
+
+function allowCallsSelected() {
+  const phones = requireSelection();
+  if (!phones) return;
+  bulkAccessWrite(phones, () => ({ callsAllowed: true }), 'السماح بمكالمات المحدَّدين', null);
+}
+
+function deleteSelectedProviders() {
+  const phones = requireSelection();
+  if (!phones) return;
+  const ids = phones
+    .map((phone) => {
+      const p = providersState.find((x) => String(x.phone || '') === phone);
+      return p ? String(p.id) : null;
+    })
+    .filter(Boolean);
+  askConfirm(
+    'حذف المحدَّدين من جدول اللوحة',
+    'يُمحى <strong>' + ids.length + '</strong> سطرًا من جدول أصحاب التوصيل في اللوحة، وتسحبُ معهنّ ' +
+    'بطاقاتُ قرارك فلا يظهرن للزبائن.' +
+    '<br><br><strong>وحسابُ التطبيق لا يُمسّ:</strong> يستطيع أصحابُه الدخولَ واستقبالَ المكالمات. ' +
+    'والطردُ الذي يمنع الرقمَ من التسجيل مكانُه «تسجيل أصحاب التوصيل».',
+    async () => {
+      try {
+        const ops = ids.map((id) => ({ ref: db.collection('providers').doc(id), del: true }))
+          .concat(phones.map((phone) => ({ ref: db.collection(ACCESS_COLLECTION).doc(phone), del: true })));
+        await commitInChunks(ops);
+        await logActivity('حذف أصحاب توصيل من اللوحة (جماعي)', phones.length + ' رقمًا');
+        toast('حُذف ' + ids.length + ' من الجدول وسُحبت بطاقاتهم');
+        clearProviderPicks();
+        loadProviders();
+      } catch (err) { toast(err.message, true); }
+    },
+    { danger: true, confirm: 'حذف' }
+  );
+}
+
+/* ---------- سطرُ صاحبِ توصيلٍ بيدِ اللوحة ---------- */
+
+/**
+ * **وليس حسابَ دخول:** هذا البابُ كان يُغرِي بأن يُسمّى «إضافة صاحب
+ * توصيل» ثم لا يجد الرجلُ اسمَه في التطبيق. فالسطرُ هنا جدولُ اللوحة
+ * وحده، والدخولُ يُنشأ من هاتف صاحبه بوثائقه، والظهورُ للزبائن قرارٌ ثالث
+ * لا يُمنح بلا فترةٍ مكتوبة — واللوحةُ تقول الثلاثَ في شاشةٍ واحدة.
+ */
+function addProvider() {
+  const overlay = openModal({
+    title: 'إضافة صاحب توصيل إلى جدول اللوحة',
+    body:
+      '<div style="display:grid;gap:10px">' +
+      '<label>الاسم الكامل</label><input id="np-name" type="text" class="modal-input">' +
+      '<label>رقم الهاتف</label><input id="np-phone" type="text" class="modal-input" style="direction:ltr" inputmode="tel">' +
+      '<label>رقم اللوحة</label><input id="np-plate" type="text" class="modal-input">' +
+      '<p class="login-sub">هذا السطرُ يظهر في جداول اللوحة وحدها. ' +
+      '<strong>وهو لا يفتح حسابَ دخول في التطبيق:</strong> صاحبُ الرقم يسجّل من هاتفه بوثائقه ثم تقبله أنت. ' +
+      'ولن يظهر للزبائن مهما كتبتَه هنا حتى تمنحه فترةً — تجريبيةً أو اشتراكًا.</p>' +
+      '</div>',
+    foot:
+      '<button class="modal-btn ghost" data-close>إلغاء</button>' +
+      '<button class="modal-btn ok" data-submit>إضافة السطر</button>',
+  });
+  const submit = async () => {
+    const name = overlay.querySelector('#np-name').value.trim();
+    const phone = overlay.querySelector('#np-phone').value.trim();
+    const plate = overlay.querySelector('#np-plate').value.trim();
+    const btn = overlay.querySelector('[data-submit]');
+    if (!name || !phone) return toast('الاسم والرقم مطلوبان', true);
+    if (providersState.some((p) => String(p.phone || '').trim() === phone)) {
+      return toast('هذا الرقم له سطرٌ في الجدول بالفعل: عدّل سطرَه ولا تُضِف ثانِيًا', true);
+    }
+    btn.disabled = true;
+    try {
+      await db.collection('providers').add({
+        name: name,
+        phone: phone,
+        plate: plate,
+        rating: 0,
+        added_by: String((ADMIN && (ADMIN.full_name || ADMIN.username)) || ''),
+        added_at: firebase.firestore.FieldValue.serverTimestamp(),
+      });
+      overlay.remove();
+      await logActivity('إضافة صاحب توصيل إلى جدول اللوحة', name + ' · ' + phone);
+      toast('أُضيف السطر: وبلا فترةٍ مكتوبة يبقى مخفيًّا عن الزبائن');
+      loadProviders();
+    } catch (err) {
+      btn.disabled = false;
+      toast(err.message, true);
+    }
+  };
+  overlay.querySelector('[data-close]').addEventListener('click', () => overlay.remove());
+  overlay.querySelector('[data-submit]').addEventListener('click', submit);
 }
 
 function editProvider(id) {
@@ -3762,17 +4363,26 @@ async function loadRenewals() {
   if (renewalsFilter) rows = rows.filter((r) => (r.status || 'pending') === renewalsFilter);
   renewalsState = rows;
 
-  const names = await providerNamesByPhone();
+  renewalsNames = await providerNamesByPhone();
   const phones = Array.from(new Set(rows.map((r) => String(r.phone || '')).filter(Boolean)));
   renewalsAccess = await loadAccess(phones);
   setSegCount('renewals-pending', snap.docs.filter((d) => (d.data().status || 'pending') === 'pending').length);
+  renderRenewals();
+}
 
+let renewalsNames = {};
+
+/** رسمُ قائمة التجديدات وحدها: الأسماءُ والقراراتُ محفوظةٌ من القراءة. */
+function renderRenewals() {
   const body = $('#renewals-body');
-  if (!renewalsState.length) {
-    body.innerHTML = '<tr class="empty-row"><td colspan="8">لا تجديدات في هذه الحالة</td></tr>';
+  if (!body) return;
+  const rows = renewalsState.filter((r) => searchHit('renewals', [r.phone, r.reference, r.id]));
+  if (!rows.length) {
+    body.innerHTML = '<tr class="empty-row"><td colspan="8">' +
+      (renewalsState.length ? 'لا نتيجة لهذا البحث' : 'لا تجديدات في هذه الحالة') + '</td></tr>';
     return;
   }
-  body.innerHTML = renewalsState
+  body.innerHTML = rows
     .map((r) => {
       const st = r.status || 'pending';
       const phone = String(r.phone || '');
@@ -3792,7 +4402,7 @@ async function loadRenewals() {
         '<tr>' +
         '<td style="font-size:11px;max-width:90px;overflow:hidden;text-overflow:ellipsis" title="' + esc(r.id) + '">' +
           esc(String(r.id).substring(0, 10)) + '</td>' +
-        '<td><strong>' + esc(names[phone] || 'غير مسجّل في الجدول') + '</strong>' +
+        '<td><strong>' + esc(renewalsNames[phone] || 'غير مسجّل في الجدول') + '</strong>' +
           '<div style="direction:ltr;text-align:right;font-size:12px">' + esc(phone) + '</div></td>' +
         '<td>' + esc(fmtMoney(r.amount)) + '</td>' +
         '<td>' + ref + (ref ? '' : '—') + '</td>' +
@@ -4031,7 +4641,12 @@ async function eraseProviderPasswords() {
 async function commitInChunks(ops) {
   for (let i = 0; i < ops.length; i += 400) {
     const batch = db.batch();
-    ops.slice(i, i + 400).forEach((op) => batch.set(op.ref, op.data, op.opts));
+    ops.slice(i, i + 400).forEach((op) => {
+      // و`del` هي الحذفُ في هذا الطريق: الكتابةُ بدمجٍ لا تمحو حقلًا،
+      // والطمسُ والمسحُ يحتاجان عمليةَ حذفٍ مستقلة.
+      if (op.del) batch.delete(op.ref);
+      else batch.set(op.ref, op.data, op.opts);
+    });
     await batch.commit();
   }
 }
@@ -4094,19 +4709,30 @@ async function grantTrialBatch(phones, days, until) {
 async function loadCustomers() {
   const snap = await db.collection('customers').get();
   customersState = snap.docs.map(d => ({ id: d.id, ...d.data() }));
+  renderCustomers();
+}
+
+/** رسمُ جدول الزبائن وحده: البحثُ لا يُعيد قراءة القاعدة. */
+function renderCustomers() {
   const body = $('#customers-body');
+  if (!body) return;
   if (!customersState.length) {
     body.innerHTML = '<tr class="empty-row"><td colspan="6">لا يوجد زبائن</td></tr>';
     return;
   }
-  body.innerHTML = customersState
+  const rows = customersState.filter((c) => searchHit('customers', [c.name, c.phone, c.id]));
+  if (!rows.length) {
+    body.innerHTML = '<tr class="empty-row"><td colspan="6">لا نتيجة لهذا البحث</td></tr>';
+    return;
+  }
+  body.innerHTML = rows
     .map((c) =>
       '<tr>' +
       '<td style="font-size:11px;max-width:80px;overflow:hidden;text-overflow:ellipsis" title="' + esc(c.id) + '">' + esc(c.id.substring(0, 8)) + '</td>' +
       '<td>' +
       '<div class="cell-user">' +
       (c.photo
-        ? '<img class="avatar" alt="" src="data:image/jpeg;base64,' + c.photo + '">'
+        ? '<img class="avatar" alt="" src="data:image/jpeg;base64,' + esc(c.photo) + '">'
         : '<span class="avatar avatar-fallback">' + esc(((c.name || '?').trim().charAt(0)) || '?') + '</span>') +
       '<div><strong>' + esc(c.name) + '</strong>' +
       (c.blocked ? ' <span class="badge rejected">محظور</span>' : (c.is_active === 0 ? ' <span class="badge inactive">موقوف</span>' : '')) +
@@ -4321,20 +4947,76 @@ async function deleteCustomer(id) {
   );
 }
 
-/* ---------- Activity ---------- */
+/* ---------- سجل النشاط ---------- */
+
+let activityState = [];
 
 async function loadActivity() {
   const snap = await db.collection('activity_log').orderBy('created_at', 'desc').limit(100).get();
-  const rows = snap.docs.map(d => ({ id: d.id, ...d.data() }));
+  activityState = snap.docs.map(d => ({ id: d.id, ...d.data() }));
+  renderActivity();
+}
+
+function renderActivity() {
   const el = $('#activity-full');
-  el.innerHTML =
-    rows
-      .map(
-        (a) =>
-          '<li>' + esc(a.action) + (a.target ? ' — <strong>' + esc(a.target) + '</strong>' : '') +
-          '<span class="act-time">' + fmtDate(a.created_at) + '</span></li>'
-      )
-      .join('') || '<li>لا يوجد نشاط بعد</li>';
+  if (!el) return;
+  const rows = activityState.filter((a) =>
+    searchHit('activity', [a.action, a.target, a.admin_name])
+  );
+  el.innerHTML = rows.map((a) =>
+    '<li>' + esc(a.action) + (a.target ? ' — <strong>' + esc(a.target) + '</strong>' : '') +
+    (canWrite()
+      ? '<button class="btn-sm no act-del" onclick="deleteActivityLine(\'' + esc(a.id) + '\')">حذف</button>'
+      : '') +
+    '<span class="act-time">' + fmtDate(a.created_at) + '</span></li>'
+  ).join('') ||
+    '<li>' + (activityState.length ? 'لا نتيجة لهذا البحث' : 'لا يوجد نشاط بعد') + '</li>';
+}
+
+/** سطرٌ واحد يُشَقّ من الدفتر: ما فُعِل وفيمن، في سطرٍ واحد. */
+function deleteActivityLine(id) {
+  const a = activityState.find((x) => x.id === id);
+  askConfirm(
+    'حذف سطر من سجل النشاط',
+    'يُمحى سطر «<strong>' + esc((a && a.action) || id) + '</strong>' +
+    (a && a.target ? ' — ' + esc(a.target) : '') + '» محوًا نهائيًا. ' +
+    'والسجلُّ دفترُ اللوحة وحدها: لا يمسّ شيئًا في الحسابات ولا في القرارات.',
+    async () => {
+      try {
+        await db.collection('activity_log').doc(String(id)).delete();
+        toast('حُذف السطر');
+        loadActivity();
+      } catch (err) { toast(err.message, true); }
+    },
+    { danger: true, confirm: 'حذف' }
+  );
+}
+
+/**
+ * مسحُ السجل كلّه بيد المالك وحده.
+ *
+ * **وليس مسحًا للقرارات:** يُمحى دفترُ «مَن فعل ماذا»، وتبقى بطاقاتُ القرار
+ * والحساباتُ والاشتراكات كما هي. ويبقى بعده سطرٌ واحدٌ يقول إنه حدث — لأن
+ * سجلًّا يزول بلا أثرٍ لا يُطمئن أحدًا ولا يُحاسب أحدًا.
+ */
+function clearActivity() {
+  askConfirm(
+    'مسح سجل النشاط',
+    'يُمحى كلُّ ما في سجل النشاط محوًا نهائيًا. يبقى ما في الحسابات من قراراتٍ واشتراكاتٍ ووثائق.' +
+    '<br><br>إن كنت تحتاج السجلَّ لمراجعةٍ بعد شهرٍ فلا تمسحه.',
+    async () => {
+      try {
+        const snap = await db.collection('activity_log').get();
+        if (!snap.docs.length) return toast('السجلُّ فارغٌ أصلًا');
+        await commitInChunks(snap.docs.map((d) => ({ ref: d.ref, del: true })));
+        activityState = [];
+        renderActivity();
+        await logActivity('مسح سجل النشاط', snap.docs.length + ' سطرًا');
+        toast('مُحي السجل (' + snap.docs.length + ' سطرًا) وبقي سطرُ المسح نفسه');
+      } catch (err) { toast(err.message, true); }
+    },
+    { danger: true, confirm: 'مسح الكل' }
+  );
 }
 
 /* ---------- Settings ---------- */
@@ -4514,6 +5196,16 @@ $('#orders-search').addEventListener('input', () => {
   clearTimeout(searchT);
   searchT = setTimeout(loadOrders, 350);
 });
+
+/* بحثُ الجداول: كلُّ خانةٍ تُرشِّح جدولَها من الذاكرة بلا قراءةٍ جديدة. */
+bindSearch('calls-search', 'calls', renderCallsTable);
+bindSearch('trips-search', 'trips', renderTrips);
+bindSearch('providers-search', 'providers', renderProviders);
+bindSearch('customers-search', 'customers', renderCustomers);
+bindSearch('requests-search', 'requests', renderRequests);
+bindSearch('driverreq-search', 'driverreq', renderDriverRequests);
+bindSearch('renewals-search', 'renewals', renderRenewals);
+bindSearch('activity-search', 'activity', renderActivity);
 
 function startClock() {
   const update = () => {

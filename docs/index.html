@@ -7,7 +7,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=Tajawal:wght@400;500;700;800;900&display=swap" rel="stylesheet" />
-  <link rel="stylesheet" href="style.css?v=20261025i" />
+  <link rel="stylesheet" href="style.css?v=20261025j" />
   <script src="https://www.gstatic.com/firebasejs/10.14.1/firebase-app-compat.js"></script>
   <script src="https://www.gstatic.com/firebasejs/10.14.1/firebase-auth-compat.js"></script>
   <script src="https://www.gstatic.com/firebasejs/10.14.1/firebase-firestore-compat.js"></script>
@@ -122,6 +122,7 @@
             <button class="seg-btn" data-status="approved">مقبول</button>
             <button class="seg-btn" data-status="rejected">مرفوض</button>
           </div>
+          <input id="requests-search" class="search-input" type="text" placeholder="بحث بالاسم أو الهاتف أو المعرّف..." />
           <button class="btn-ghost" data-reload="requests">تحديث</button>
           <button class="btn-ghost danger" onclick="deleteAllRequests()">حذف الكل</button>
         </div>
@@ -152,6 +153,7 @@
               <button class="seg-btn" data-status="approved">مقبول</button>
               <button class="seg-btn" data-status="rejected">مرفوض</button>
             </div>
+            <input id="driverreq-search" class="search-input" type="text" placeholder="بحث بالاسم أو الهاتف أو المعرّف..." />
             <button class="btn-ghost" data-reload="driverRequests">تحديث</button>
           </div>
           <div class="table-card">
@@ -175,6 +177,7 @@
             <button class="seg-btn" data-status="approved">معتمد</button>
             <button class="seg-btn" data-status="rejected">مرفوض</button>
           </div>
+          <input id="renewals-search" class="search-input" type="text" placeholder="بحث بالرقم أو رقم العملية..." />
           <button class="btn-ghost" data-reload="renewals">تحديث</button>
         </div>
         <div class="table-card">
@@ -227,6 +230,7 @@
             <button class="seg-btn" data-status="missed">فائتة</button>
             <button class="seg-btn" data-status="ended">منتهية</button>
           </div>
+          <input id="calls-search" class="search-input" type="text" placeholder="بحث بالاسم أو الرقم أو المعرّف..." />
           <button class="btn-ghost ok" onclick="openNewCallModal()">اتصال داخل التطبيق</button>
           <button class="btn-ghost" data-reload="calls">تحديث</button>
         </div>
@@ -248,6 +252,7 @@
         <div class="filter-bar">
           <h3 class="section-title">سجل التواصل</h3>
           <select id="trips-customer" class="modal-input" style="max-width:300px"></select>
+          <input id="trips-search" class="search-input" type="text" placeholder="بحث بصاحب التوصيل أو القناة..." />
           <button class="btn-ghost" data-reload="trips">تحديث</button>
         </div>
         <div class="stats-grid" id="trips-summary"></div>
@@ -268,14 +273,30 @@
         <div class="filter-bar">
           <h3 class="section-title">أصحاب التوصيل</h3>
           <span id="providers-access-note" class="badge offline"></span>
+          <input id="providers-search" class="search-input" type="text" placeholder="بحث بالاسم أو الرقم أو اللوحة..." />
+          <button class="btn-ghost ok" onclick="addProvider()">إضافة صاحب توصيل</button>
           <button class="btn-ghost ok" onclick="backfillAccess()">توحيد الصلاحيات</button>
           <button class="btn-ghost no" onclick="eraseProviderPasswords()">طمس كلمات السرّ المخزّنة</button>
           <button class="btn-ghost" data-reload="providers">تحديث</button>
+        </div>
+        <div class="filter-bar prov-bulk" id="providers-bulk-bar">
+          <span id="providers-pick-count" class="badge inactive">لا أحد محدد</span>
+          <button class="btn-ghost" onclick="pickInvisibleProviders()">اختر كل من لا يظهر</button>
+          <button class="btn-ghost" onclick="clearProviderPicks()">إلغاء التحديد</button>
+          <button class="btn-ghost ok" onclick="grantTrialSelected()">تجريبية للمحدَّدين</button>
+          <button class="btn-ghost ok" onclick="grantPaidSelected()">اشتراك مدفوع للمحدَّدين</button>
+          <button class="btn-ghost no" onclick="stopSubscriptionSelected()">إيقاف اشتراكهم</button>
+          <button class="btn-ghost no" onclick="freezeSelected()">تجميد حساباتهم</button>
+          <button class="btn-ghost ok" onclick="unfreezeSelected()">رفع التجميد</button>
+          <button class="btn-ghost no" onclick="blockCallsSelected()">منع مكالماتهم</button>
+          <button class="btn-ghost ok" onclick="allowCallsSelected()">السماح بمكالماتهم</button>
+          <button class="btn-ghost danger" onclick="deleteSelectedProviders()">حذف المحدَّدين</button>
         </div>
         <div class="table-card">
           <table>
             <thead>
               <tr>
+                <th style="width:36px"><input type="checkbox" id="providers-pick-all" onchange="pickAllProviders(this)" title="تحديد كل المعروض"></th>
                 <th>#</th><th>الاسم</th><th>الهاتف</th><th>ظهوره للزبائن</th><th>إحداثيات سُلّمت</th><th>اللوحة</th><th>التقييم</th>
                 <th>نهاية الفترة</th><th>قرار اللوحة</th><th>إجراءات</th>
               </tr>
@@ -288,6 +309,7 @@
       <section id="view-customers" class="view">
         <div class="filter-bar">
           <h3 class="section-title">الزبائن</h3>
+          <input id="customers-search" class="search-input" type="text" placeholder="بحث بالاسم أو الهاتف..." />
           <button class="btn-ghost" data-reload="customers">تحديث</button>
         </div>
         <div class="table-card">
@@ -319,12 +341,14 @@
       <section id="view-admins" class="view">
         <div class="filter-bar">
           <h3 class="section-title">المشرفون وطلبات الصلاحية</h3>
+          <button class="btn-ghost ok" onclick="createAdmin()">إضافة مشرف</button>
           <button class="btn-ghost" data-reload="admins">تحديث</button>
         </div>
         <div class="card">
           <p class="login-sub" style="margin-top:0">
             الموظف الجديد يضغط «طلب صلاحية مشرف» في شاشة الدخول فيُنشئ حسابه ويظهر طلبه هنا، ثم تقبله فيصير مشرفاً.
-            لا يمكن لأي شخص أن يصبح مشرفاً من تلقاء نفسه.
+            لا يمكن لأي شخص أن يصبح مشرفاً من تلقاء نفسه. وإن كان الرجلُ عندك وتحتاجه يعمل اليوم فأنشئْه بيدك من «إضافة مشرف» —
+            ببريدٍ حقيقيّ وكلمةٍ مؤقّتة ودرجةٍ تختارها، فدرجةُ المالك لا تُمنح من هنا.
           </p>
         </div>
         <div class="table-card">
@@ -350,7 +374,9 @@
       <section id="view-activity" class="view">
         <div class="filter-bar">
           <h3 class="section-title">سجل النشاط</h3>
+          <input id="activity-search" class="search-input" type="text" placeholder="بحث بالإجراء أو الاسم أو الرجل..." />
           <button class="btn-ghost" data-reload="activity">تحديث</button>
+          <button class="btn-ghost danger" onclick="clearActivity()">مسح السجل</button>
         </div>
         <div class="card">
           <ul id="activity-full" class="activity-list"></ul>
@@ -389,6 +415,6 @@
 
   <div id="modal-root"></div>
   <div id="toast" class="toast hidden"></div>
-  <script src="app.js?v=20261025i"></script>
+  <script src="app.js?v=20261025j"></script>
 </body>
 </html>

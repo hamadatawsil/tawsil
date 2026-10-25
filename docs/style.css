@@ -846,3 +846,10 @@ tbody tr:hover { background: #fafcfa; }
   .modal-body { padding: 10px 12px; }
   .modal-label { margin: 10px 0 5px; }
 }
+
+/* ---------- أدوات التحديد والبحث في الجداول ---------- */
+.prov-pick,
+#providers-pick-all { width: 16px; height: 16px; margin: 0; accent-color: var(--primary); cursor: pointer; }
+.pick-cell { width: 34px; text-align: center; }
+.prov-bulk { margin-top: -2px; gap: 8px; }
+.act-del { margin: 0 8px; }
