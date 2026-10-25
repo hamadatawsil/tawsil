@@ -8,15 +8,24 @@ let providersState = [];
 let customersState = [];
 let driverReqState = [];
 
-/* ---------- إعدادات المكالمات (Agora) ---------- */
-const AGORA_APP_ID = '9f539745893d4bbb86741430ab9137db';
-const AGORA_APP_CERT = '4f051a05587648238e6d208198db110f';
+/* ---------- إعدادات المكالمات: بروتوكول التطبيق نفسه ---------- */
 const CALL_ADMIN_ID = 'admin';
-const CALL_ADMIN_UID = 2;
 const RING_TIMEOUT_MS = 60000;
-const RUN_SHA = 'v20261006-1';
+const RUN_SHA = 'v20261025-1';
 
-try { console.log('[app] built:', RUN_SHA, '| AgoraRTC version:', (typeof AgoraRTC !== 'undefined' ? AgoraRTC.VERSION : 'غير محمّل')); } catch (_) {}
+/// مستند الإشارة: الاسم نفسه الذي يقرؤه `call_service_inapp.dart` في الجوّال.
+const SIGNAL_COLLECTION = 'call_signal';
+
+/*
+ * **STUN وحده، بلا خادم تحويل:** TURN يحتاج عقدًا مدفوعًا عند مزوّد خدمة،
+ * فمن يبنِ مكالماته على «مجاني شركة» يبقِ هاتفه رهينة سعرها. هنا يتعارف
+ * الجهازان على الشبكة العامة ويمشي الصوت بينهما مباشرة.
+ */
+const CALL_ICE_SERVERS = [
+  { urls: ['stun:stun.l.google.com:19302', 'stun:stun1.l.google.com:19302'] },
+];
+
+try { console.log('[app] built:', RUN_SHA, '| WebRTC:', (typeof RTCPeerConnection !== 'undefined' ? 'متاح' : 'غير متاح')); } catch (_) {}
 
 const CALL_STATUS_LABELS = {
   ringing: 'يرن',
@@ -26,12 +35,29 @@ const CALL_STATUS_LABELS = {
   missed: 'فائتة',
 };
 
+/// أسباب الانتهاء: الكلمات نفسها التي يكتبها التطبيق في `endReason`.
+const CALL_END_LABELS = {
+  callee_no_answer: 'لم يردّ',
+  caller_timeout: 'انتهى وقت الانتظار',
+  callee_unavailable: 'غير متاح',
+  caller_unavailable: 'تعذّر بدء الاتصال',
+  admin_declined: 'رفضته الإدارة',
+  admin_unavailable: 'الإدارة غير متاحة',
+  admin_ended: 'أنهتها الإدارة',
+  admin_suspended: 'موقوفة من الإدارة',
+  admin_error: 'خطأ في جهة الإدارة',
+};
+
 let callsState = [];
 let callsSub = null;
 let ringToneTimer = null;
 let activeRingCallId = null;
-let callEngine = null;
+let callPeer = null;
 let callMicTrack = null;
+let callLocalStream = null;
+let callSignalSub = null;
+let callDocSub = null;
+let activeCallId = null;
 let callInProgress = false;
 const handledRinging = new Set();
 
@@ -343,101 +369,25 @@ async function logActivity(action, target) {
   } catch {}
 }
 
-/* ---------- المكالمات (Agora) ---------- */
+/* ---------- المكالمات: بروتوكول التطبيق نفسه (WebRTC بلا وسيط) ---------- */
+
+/*
+ * **لا SDK ولا مفاتيح شركة:** الجوّال والمتصفّح يتصافحان مباشرة بـ
+ * `RTCPeerConnection` الأصلي، والإشارة (العرض والجواب وعناوين ICE) تمرّ في
+ * `call_signal/{callId}` كما في `call_service_inapp.dart` حرفيًّا: المتصل
+ * يكتب `offer` و`iceCaller`، والمتّصل به يكتب `answer` و`iceCallee`، وكل
+ * طرف يلمس صندوقه وحده بكتابة مدموجة فلا يمحوا ما كتبه الآخر.
+ *
+ * **والقائمتان متطابقتان عمدًا:** أي تغيير في اسم حقل هنا يجب أن يقابله
+ * هناك في اللحظة نفسها، وإلا صارت المكالمة تُفتح ولا تُغلق.
+ */
 
 function callRoleLabel(role) {
   const map = { guest: 'زائر', customer: 'زبون', driver: 'صاحب توصيل', owner: 'صاحب توصيل', admin: 'الإدارة' };
   return map[role] || role || '—';
 }
 
-async function agoraHmacSha256(keyBytes, dataBytes) {
-  const key = await crypto.subtle.importKey(
-    'raw', keyBytes, { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']
-  );
-  const sig = await crypto.subtle.sign('HMAC', key, dataBytes);
-  return new Uint8Array(sig);
-}
-
-function agWriteUint16(bytes, off, v) {
-  bytes[off] = v & 0xff;
-  bytes[off + 1] = (v >> 8) & 0xff;
-}
-
-function agWriteUint32(bytes, off, v) {
-  bytes[off] = v & 0xff;
-  bytes[off + 1] = (v >>> 8) & 0xff;
-  bytes[off + 2] = (v >>> 16) & 0xff;
-  bytes[off + 3] = (v >>> 24) & 0xff;
-}
-
-function agCrc32(bytes) {
-  let crc = 0xFFFFFFFF;
-  for (let i = 0; i < bytes.length; i++) {
-    crc ^= bytes[i];
-    for (let j = 0; j < 8; j++) crc = (crc >>> 1) ^ (0xEDB88320 & -(crc & 1));
-  }
-  return (crc ^ 0xFFFFFFFF) >>> 0;
-}
-
-function agBase64(bytes) {
-  const CH = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
-  let out = '';
-  for (let i = 0; i < bytes.length; i += 3) {
-    const b0 = bytes[i];
-    const b1 = i + 1 < bytes.length ? bytes[i + 1] : 0;
-    const b2 = i + 2 < bytes.length ? bytes[i + 2] : 0;
-    out += CH[b0 >> 2];
-    out += CH[((b0 & 3) << 4) | (b1 >> 4)];
-    out += i + 1 < bytes.length ? CH[((b1 & 15) << 2) | (b2 >> 6)] : '=';
-    out += i + 2 < bytes.length ? CH[b2 & 63] : '=';
-  }
-  return out;
-}
-
-function agPackMessage(salt, ts, expireTs) {
-  const out = new Uint8Array(34);
-  let off = 0;
-  agWriteUint32(out, off, salt); off += 4;
-  agWriteUint32(out, off, ts); off += 4;
-  agWriteUint16(out, off, 4); off += 2;
-  [1, 2, 3, 4].forEach((k) => {
-    agWriteUint16(out, off, k); off += 2;
-    agWriteUint32(out, off, expireTs); off += 4;
-  });
-  return out;
-}
-
-function agConcat(parts) {
-  const len = parts.reduce((s, b) => s + b.length, 0);
-  const out = new Uint8Array(len);
-  let off = 0;
-  for (const b of parts) { out.set(b, off); off += b.length; }
-  return out;
-}
-
-async function agoraToken(appId, appCert, channel, uid, expireTs) {
-  const te = new TextEncoder();
-  const uidStr = uid === 0 ? '' : String(uid);
-  const salt = (Math.floor(Math.random() * 0x7fffffff) + (Math.floor(Math.random() * 2) << 31)) >>> 0;
-  const ts = Math.floor(Date.now() / 1000) + 24 * 3600;
-  const m = agPackMessage(salt, ts, expireTs);
-
-  const signData = agConcat([te.encode(appId), te.encode(channel), te.encode(uidStr), m]);
-  const sig = await agoraHmacSha256(te.encode(appCert), signData);
-  const crcChannel = agCrc32(te.encode(channel));
-  const crcUid = agCrc32(te.encode(uidStr));
-
-  const content = new Uint8Array(2 + sig.length + 4 + 4 + 2 + m.length);
-  let off = 0;
-  agWriteUint16(content, off, sig.length); off += 2;
-  content.set(sig, off); off += sig.length;
-  agWriteUint32(content, off, crcChannel); off += 4;
-  agWriteUint32(content, off, crcUid); off += 4;
-  agWriteUint16(content, off, m.length); off += 2;
-  content.set(m, off);
-
-  return '006' + appId + agBase64(content);
-}
+/* ---------- نغمة الرنين ---------- */
 
 const BUILD_CACHE = '20260908-4';
 let ringBuffer = null;
@@ -484,11 +434,299 @@ function stopRingTone() {
   }
 }
 
+/* ---------- مستند المكالمة ---------- */
+
 async function endCallDoc(callId, status, reason) {
   const patch = { status, endedAt: firebase.firestore.FieldValue.serverTimestamp() };
   if (reason) patch.endReason = reason;
-  try { await db.collection('calls').doc(callId).update(patch); } catch {}
+  try { await db.collection('calls').doc(callId).update(patch); } catch (_) {}
 }
+
+/// «جارية» لا تُكتب إلا حين يمشي الصوت فعلًا، فلا يُحسب زمنٌ لم يتكلّم فيه أحد.
+async function markCallOngoing(callId) {
+  try {
+    await db.collection('calls').doc(callId).update({
+      status: 'ongoing',
+      startedAt: firebase.firestore.FieldValue.serverTimestamp(),
+    });
+  } catch (_) {}
+}
+
+/// صندوق الرنين يُمسح بيد من يقرّره: لو بقي صار صاحِب الرقم يرنّ على مكالمة ماتت.
+async function clearRingBox(phone) {
+  if (!phone) return;
+  try { await db.collection('call_rings').doc(phone).delete(); } catch (_) {}
+}
+
+/* ---------- آلة الصوت ---------- */
+
+let seenRemoteCands = new Set();
+let sentLocalCands = new Set();
+let callRemoteAudio = null;
+let callOngoingMarked = false;
+
+function callMicFailure(err) {
+  const name = (err && err.name) || '';
+  if (/NotAllowed|Permission|denied|Security/i.test(name)) {
+    return 'ممنوع الوصول إلى الميكروفون: اسمح بالميكروفون في المتصفح ثم أعد المحاولة.';
+  }
+  if (/NotFound|Devices/i.test(name)) return 'لا ميكروفون في هذا الجهاز.';
+  return String((err && err.message) || err || 'خطأ غير معروف');
+}
+
+async function attachLocalMic(pc) {
+  const stream = await navigator.mediaDevices.getUserMedia({
+    audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
+    video: false,
+  });
+  callLocalStream = stream;
+  const tracks = stream.getAudioTracks();
+  callMicTrack = tracks.length ? tracks[0] : null;
+  tracks.forEach((t) => pc.addTrack(t, stream));
+}
+
+function bindRemoteAudio(pc) {
+  pc.ontrack = (e) => {
+    const stream = e.streams && e.streams[0];
+    if (!stream) return;
+    if (!callRemoteAudio) {
+      callRemoteAudio = document.createElement('audio');
+      callRemoteAudio.autoplay = true;
+      document.body.appendChild(callRemoteAudio);
+    }
+    callRemoteAudio.srcObject = stream;
+    callRemoteAudio.play().catch(() => {});
+  };
+}
+
+/// الكتابة مدموجة دائمًا: الحقل الذي لم يُذكر يبقى كما هو عند الطرف الآخر.
+function writeSignal(callId, fields) {
+  const patch = Object.assign(
+    { callId: callId, updatedAt: firebase.firestore.FieldValue.serverTimestamp() },
+    fields,
+  );
+  return db.collection(SIGNAL_COLLECTION).doc(callId).set(patch, { merge: true });
+}
+
+function publishCandidates(pc, callId, isCaller) {
+  pc.onicecandidate = (e) => {
+    if (!e.candidate) return;
+    const box = isCaller ? 'iceCaller' : 'iceCallee';
+    const encoded = JSON.stringify({
+      candidate: e.candidate.candidate,
+      sdpMid: e.candidate.sdpMid,
+      sdpMLineIndex: e.candidate.sdpMLineIndex,
+    });
+    if (sentLocalCands.has(encoded)) return;
+    sentLocalCands.add(encoded);
+    const payload = {};
+    payload[box] = firebase.firestore.FieldValue.arrayUnion(encoded);
+    writeSignal(callId, payload).catch(() => {});
+  };
+}
+
+async function addRemoteCandidates(pc, raw) {
+  if (!Array.isArray(raw)) return;
+  for (const item of raw) {
+    if (typeof item !== 'string' || seenRemoteCands.has(item)) continue;
+    seenRemoteCands.add(item);
+    try {
+      const json = JSON.parse(item);
+      await pc.addCandidate({
+        candidate: json.candidate,
+        sdpMid: json.sdpMid,
+        sdpMLineIndex: json.sdpMLineIndex,
+      });
+    } catch (_) {
+      /// مرشّحٌ سبق العرض: يُعاد قراءته مع التحديث التالي للمستند.
+      seenRemoteCands.delete(item);
+    }
+  }
+}
+
+/**
+ * يراقب مستند الإشارة. `isCaller` تحدد الصندوق الذي يُقرأ والآخر الذي يُكتب:
+ * المتصل ينتظر `answer` و`iceCallee`، والمتّصل به ينتظر `offer` و`iceCaller`
+ * ثم يردّ بجوابه من فوره.
+ */
+function watchSignal(callId, isCaller, pc) {
+  if (callSignalSub) { callSignalSub(); callSignalSub = null; }
+  let offerApplied = false;
+  let answerApplied = false;
+  callSignalSub = db.collection(SIGNAL_COLLECTION).doc(callId).onSnapshot(async (snap) => {
+    if (!snap.exists || !callPeer) return;
+    const data = snap.data() || {};
+    try {
+      if (isCaller) {
+        const answer = data.answer;
+        if (answer && answer.sdp && !answerApplied) {
+          answerApplied = true;
+          await pc.setRemoteDescription({ type: answer.type || 'answer', sdp: answer.sdp });
+        }
+        await addRemoteCandidates(pc, data.iceCallee);
+      } else {
+        const offer = data.offer;
+        if (offer && offer.sdp && !offerApplied) {
+          offerApplied = true;
+          await pc.setRemoteDescription({ type: offer.type || 'offer', sdp: offer.sdp });
+          const local = await pc.createAnswer();
+          await pc.setLocalDescription(local);
+          await writeSignal(callId, { answer: { type: local.type || 'answer', sdp: local.sdp } });
+        }
+        await addRemoteCandidates(pc, data.iceCaller);
+      }
+    } catch (err) {
+      console.error('[calls] signal error', err);
+    }
+  }, (err) => console.error('[calls] signal listener error', err));
+}
+
+/// حالة الصوت تُقرأ من الوصلة نفسها، فلا رسالة «متصل» قبل أن يمشي الصوت.
+function trackConnection(pc, callId) {
+  pc.onconnectionstatechange = () => {
+    const st = pc.connectionState;
+    if (st === 'connected') {
+      setCallStatusText('الصوت متصل');
+      if (!callOngoingMarked) {
+        callOngoingMarked = true;
+        markCallOngoing(callId);
+      }
+    } else if (st === 'failed') {
+      setCallStatusText('تعذّر ربط الصوت — جرّب شبكة أخرى');
+    } else if (st === 'disconnected') {
+      setCallStatusText('انقطعت الوصلة');
+    }
+  };
+}
+
+function setCallStatusText(text) {
+  const el = document.getElementById('call-state');
+  if (el) el.textContent = text;
+}
+
+/**
+ * الطرف الآخر يُغلق المكالمة على جواله أو يوقفها المشرف من هنا: الشاشة
+ * تُغلق وحدها لأن حالة المستند تُقرأ، لا لأن أحدًا أرسل رسالة إغلاق.
+ */
+function watchCallEnd(callId) {
+  if (callDocSub) { callDocSub(); callDocSub = null; }
+  callDocSub = db.collection('calls').doc(callId).onSnapshot((snap) => {
+    if (!snap.exists) return;
+    const status = (snap.data() || {}).status;
+    if (status !== 'ended' && status !== 'declined' && status !== 'missed') return;
+    if (activeCallId !== callId) return;
+    clearActiveCallTicker();
+    closeActiveCallOverlay();
+    teardownCall();
+    toast('انتهت المكالمة.');
+  }, (err) => console.error('[calls] doc listener error', err));
+}
+
+function teardownCall() {
+  if (callSignalSub) { callSignalSub(); callSignalSub = null; }
+  if (callDocSub) { callDocSub(); callDocSub = null; }
+  try { if (callPeer) callPeer.close(); } catch (_) {}
+  callPeer = null;
+  try { if (callLocalStream) callLocalStream.getTracks().forEach((t) => t.stop()); } catch (_) {}
+  callLocalStream = null;
+  callMicTrack = null;
+  if (callRemoteAudio) {
+    try { callRemoteAudio.pause(); callRemoteAudio.srcObject = null; callRemoteAudio.remove(); } catch (_) {}
+    callRemoteAudio = null;
+  }
+  seenRemoteCands = new Set();
+  sentLocalCands = new Set();
+  callOngoingMarked = false;
+  activeCallId = null;
+  callInProgress = false;
+}
+
+/* ---------- الردّ على وارد ---------- */
+
+async function answerIncomingCall(data) {
+  const callId = data.id;
+  try {
+    callInProgress = true;
+    const pc = new RTCPeerConnection({ iceServers: CALL_ICE_SERVERS });
+    callPeer = pc;
+    bindRemoteAudio(pc);
+    await attachLocalMic(pc);
+    publishCandidates(pc, callId, false);
+    trackConnection(pc, callId);
+    watchSignal(callId, false, pc);
+    await clearRingBox(data.calleePhone || CALL_ADMIN_ID);
+    showActiveCall({ peerName: data.callerName || data.callerId, callId: callId });
+  } catch (err) {
+    console.error('[calls] answer error', err);
+    teardownCall();
+    await endCallDoc(callId, 'missed', 'admin_error');
+    toast('تعذر الرد على المكالمة: ' + callMicFailure(err), true);
+  }
+}
+
+/* ---------- اتصال صادر من الإدارة ---------- */
+
+async function startAdminCall(calleePhone, calleeName, calleeRole) {
+  if (callInProgress) { toast('هناك مكالمة جارية: أنهاها أولًا.', true); return; }
+  if (!calleePhone || !/^[0-9]{8,12}$/.test(calleePhone)) { toast('رقم غير صالح: من 8 إلى 12 رقمًا بلا رموز.', true); return; }
+  if (typeof RTCPeerConnection === 'undefined') { toast('متصفّحك لا يدعم WebRTC — جرّب Chrome أو Edge.', true); return; }
+  const callerName = (ADMIN && (ADMIN.full_name || ADMIN.username)) || 'الإدارة';
+  let callId = null;
+  try {
+    callInProgress = true;
+    const ref = db.collection('calls').doc();
+    callId = ref.id;
+    await ref.set({
+      channelName: 'call_' + callId,
+      callerId: CALL_ADMIN_ID,
+      callerName: callerName,
+      callerRole: 'admin',
+      callerPhone: CALL_ADMIN_ID,
+      calleeId: calleePhone,
+      calleeName: calleeName || calleePhone,
+      calleeRole: calleeRole,
+      calleePhone: calleePhone,
+      participants: [CALL_ADMIN_ID, calleePhone],
+      status: 'ringing',
+      createdAt: firebase.firestore.FieldValue.serverTimestamp(),
+    });
+    await db.collection('call_rings').doc(calleePhone).set({
+      callId: callId,
+      channelName: 'call_' + callId,
+      callerId: CALL_ADMIN_ID,
+      callerName: callerName,
+      callerRole: 'admin',
+      status: 'ringing',
+      createdAt: firebase.firestore.FieldValue.serverTimestamp(),
+    });
+
+    const pc = new RTCPeerConnection({ iceServers: CALL_ICE_SERVERS });
+    callPeer = pc;
+    bindRemoteAudio(pc);
+    await attachLocalMic(pc);
+    publishCandidates(pc, callId, true);
+    trackConnection(pc, callId);
+    const offer = await pc.createOffer({ offerToReceiveAudio: true });
+    await pc.setLocalDescription(offer);
+    await writeSignal(callId, { offer: { type: offer.type, sdp: offer.sdp } });
+    watchSignal(callId, true, pc);
+    watchCallEnd(callId);
+
+    await logActivity('اتصال بالمستخدم ' + calleePhone, 'users/' + calleePhone);
+    handledRinging.add(callId);
+    showActiveCall({ peerName: calleeName || calleePhone, callId: callId, outgoing: true });
+  } catch (err) {
+    console.error('[calls] start error', err);
+    teardownCall();
+    if (callId) {
+      await endCallDoc(callId, 'missed', 'caller_unavailable');
+      await clearRingBox(calleePhone);
+    }
+    toast('تعذّر بدء الاتصال: ' + callMicFailure(err), true);
+  }
+}
+
+/* ---------- الشاشات ---------- */
 
 function showIncomingCall(data) {
   if (callInProgress || activeRingCallId) return;
@@ -512,7 +750,7 @@ function showIncomingCall(data) {
   if (micHint && navigator.permissions && navigator.permissions.query) {
     navigator.permissions.query({ name: 'microphone' }).then((st) => {
       if (st.state === 'denied') {
-        micHint.textContent = 'إذن الميكروفون مرفوض لهذا الموقع — افتح القفل قرب العنوان وفعّل «الميكروفون: السماح»، ثم أعد تحميل الصفحة.';
+        micHint.textContent = 'إذن الميكروفون مرفوض لهذا الموقع: افتح القفل قرب العنوان وفعّل «الميكروفون: السماح»، ثم أعد تحميل الصفحة.';
       } else if (st.state === 'prompt') {
         micHint.textContent = 'سيطلب المتصفح إذن الميكروفون عند القبول — اضغط «السماح».';
       }
@@ -534,11 +772,13 @@ function showIncomingCall(data) {
   overlay.querySelector('[data-decline]').addEventListener('click', async () => {
     clearTimeout(close._t);
     await endCallDoc(data.id, 'declined', 'admin_declined');
+    await clearRingBox(data.calleePhone || CALL_ADMIN_ID);
     handledRinging.add(data.id);
     close();
   });
   close._t = setTimeout(async () => {
     await endCallDoc(data.id, 'missed', 'callee_no_answer');
+    await clearRingBox(data.calleePhone || CALL_ADMIN_ID);
     handledRinging.add(data.id);
     close();
   }, RING_TIMEOUT_MS);
@@ -554,11 +794,14 @@ function closeActiveCallOverlay() {
 }
 
 function showActiveCall(data) {
+  const outgoing = !!data.outgoing;
+  activeCallId = data.callId;
   const overlay = openModal({
-    title: 'مكالمة جارية',
+    title: outgoing ? 'اتصال صادر من الإدارة' : 'مكالمة جارية',
     body:
       '<div class="incoming-call-avatar">☎</div>' +
-      '<div class="incoming-call-name">' + esc(data.callerName || data.callerId || '') + '</div>' +
+      '<div class="incoming-call-name">' + esc(data.peerName || '') + '</div>' +
+      '<div class="call-status-ring" id="call-state">' + (outgoing ? 'جارٍ الرنين...' : 'لم يأتِ الصوت بعد') + '</div>' +
       '<div class="call-status-ring" id="call-timer">00:00</div>',
     foot:
       '<button class="modal-btn ghost" data-mute>كتم</button>' +
@@ -567,135 +810,138 @@ function showActiveCall(data) {
   overlay.classList.add('call-active-overlay');
   const titleClose = overlay.querySelector('.doc-lightbox-head .btn-sm');
   if (titleClose) titleClose.style.display = 'none';
+  watchCallEnd(data.callId);
 
   const t0 = Date.now();
-  const tick = setInterval(() => {
+  clearActiveCallTicker();
+  activeCallTicker = setInterval(() => {
     const el = overlay.querySelector('#call-timer');
     if (!el) return;
     const s = Math.floor((Date.now() - t0) / 1000);
     el.textContent = String(Math.floor(s / 60)).padStart(2, '0') + ':' + String(s % 60).padStart(2, '0');
   }, 1000);
-  clearActiveCallTicker();
-  activeCallTicker = tick;
 
   let muted = false;
   const muteBtn = overlay.querySelector('[data-mute]');
-  muteBtn.addEventListener('click', async () => {
+  muteBtn.addEventListener('click', () => {
     muted = !muted;
     muteBtn.textContent = muted ? 'التحدث' : 'كتم';
-    try { if (callMicTrack) await callMicTrack.setEnabled(!muted); } catch {}
+    try { if (callMicTrack) callMicTrack.enabled = !muted; } catch (_) {}
   });
   overlay.querySelector('[data-hangup]').addEventListener('click', async () => {
-    await hangupCall(data.id);
+    await hangupCall(data.callId);
   });
-}
-
-async function answerIncomingCall(data) {
-  if (typeof AgoraRTC === 'undefined') {
-    toast('فشل تحميل نظام المكالمات (Agora SDK). أعد تحميل الصفحة وتحقق من الإنترنت.', true);
-    callInProgress = false;
-    return;
-  }
-  const callId = data.id;
-  try {
-    callInProgress = true;
-    const channel = data.channelName || ('call_' + callId);
-
-    const mic = await AgoraRTC.createMicrophoneAudioTrack();
-    callMicTrack = mic;
-
-    const token = await agoraToken(
-      AGORA_APP_ID, AGORA_APP_CERT, channel, CALL_ADMIN_UID,
-      Math.floor(Date.now() / 1000) + 86400
-    );
-    const client = AgoraRTC.createClient({ mode: 'rtc' });
-    callEngine = client;
-
-    client.on('user-published', async (user, mediaType) => {
-      await client.subscribe(user, mediaType);
-      if (mediaType === 'audio' && user.audioTrack) user.audioTrack.play();
-    });
-    client.on('user-unpublished', (user, mediaType) => {
-      if (mediaType === 'audio' && user.audioTrack) user.audioTrack.stop();
-    });
-    client.on('user-left', async () => {
-      await hangupCall(callId);
-    });
-
-    await client.join(token, channel, CALL_ADMIN_UID);
-    await client.publish(mic);
-    await db.collection('calls').doc(callId).update({
-      status: 'ongoing',
-      startedAt: firebase.firestore.FieldValue.serverTimestamp(),
-    });
-    showActiveCall(data);
-    toast('مكالمة جارية الآن — ' + (data.callerName || ''));
-  } catch (err) {
-    callInProgress = false;
-    console.error('[calls] answer error', err);
-    try { if (callMicTrack) { callMicTrack.close(); callMicTrack = null; } } catch {}
-    try { if (callEngine) await callEngine.leave(); } catch {}
-    callEngine = null;
-    try { await endCallDoc(callId, 'missed', 'admin_error'); } catch {}
-    let msg;
-    if (err && err.code) {
-      msg = '[' + (err.name || 'AgoraRTCError') + ' ' + err.code + '] ' + (err.message || String(err));
-    } else {
-      msg = (err && (err.message || err.reason || String(err))) || 'خطأ غير معروف';
-    }
-    if (/NotAllowed|Permission|denied/i.test(msg)) {
-      msg = 'ممنوع الوصول إلى الميكروفون. اسمح بالميكروفون في المتصفح ثم أعد المحاولة.';
-    }
-    toast('تعذر الرد على المكالمة: ' + msg, true);
-  }
 }
 
 async function hangupCall(callId) {
-  try {
-    await db.collection('calls').doc(callId).update({
-      status: 'ended',
-      endedAt: firebase.firestore.FieldValue.serverTimestamp(),
-      endReason: 'admin_ended',
-    });
-  } catch {}
+  await endCallDoc(callId, 'ended', 'admin_ended');
+  await logActivity('أنهى مكالمة ' + callId, 'calls/' + callId);
   clearActiveCallTicker();
   closeActiveCallOverlay();
-  try { if (callMicTrack) { callMicTrack.close(); callMicTrack = null; } } catch {}
-  try { if (callEngine) await callEngine.leave(); } catch {}
-  callEngine = null;
-  callInProgress = false;
+  teardownCall();
+}
+
+/// إيقاف مكالمة جارية من بعيد: الجوّال يقرأ `admin_suspended` ويغلق بشاشته الخاصة.
+function suspendCall(callId, label) {
+  askConfirm(
+    'إيقاف المكالمة',
+    'سيُغلق الاتصال فورًا على جهاز «' + esc(label || callId) + '» ويُسجَّل السبب في سجلّ النشاط.',
+    async () => {
+      await endCallDoc(callId, 'ended', 'admin_suspended');
+      await logActivity('أوقف مكالمة ' + (label || callId), 'calls/' + callId);
+      if (activeCallId === callId) {
+        clearActiveCallTicker();
+        closeActiveCallOverlay();
+        teardownCall();
+      }
+      toast('أُوقفت المكالمة.');
+    },
+    { danger: true, confirm: 'إيقاف' },
+  );
+}
+
+/* ---------- جدول المكالمات ---------- */
+
+let callsFilter = '';
+
+function setCallsFilter(value) {
+  callsFilter = value;
+  renderCallsTable();
+}
+
+function callDuration(c) {
+  if (!c.startedAt) return '—';
+  const start = c.startedAt.toDate ? c.startedAt.toDate() : new Date(c.startedAt);
+  let end = null;
+  if (c.endedAt) end = c.endedAt.toDate ? c.endedAt.toDate() : new Date(c.endedAt);
+  else if (c.status === 'ongoing') end = new Date();
+  if (!end) return '—';
+  const diff = Math.max(0, Math.round((end - start) / 1000));
+  return String(Math.floor(diff / 60)).padStart(2, '0') + ':' + String(diff % 60).padStart(2, '0');
 }
 
 function renderCallsTable() {
   const tbody = $('#calls-body');
   if (!tbody) return;
   const buildEl = document.getElementById('calls-build-tag');
-  if (buildEl) buildEl.textContent = 'البناء: ' + RUN_SHA + ' | SDK: ' + (typeof AgoraRTC !== 'undefined' ? AgoraRTC.VERSION : 'غير محمّل');
-  if (!callsState.length) {
-    tbody.innerHTML = '<tr><td colspan="6" class="empty-cell">لا توجد مكالمات بعد</td></tr>';
+  if (buildEl) {
+    buildEl.textContent = 'البناء: ' + RUN_SHA +
+      ' | WebRTC: ' + (typeof RTCPeerConnection !== 'undefined' ? 'متاح' : 'غير متاح') +
+      ' | الإشارة: ' + SIGNAL_COLLECTION;
+  }
+  const rows = !callsFilter
+    ? callsState
+    : callsState.filter((c) => c.status === callsFilter);
+  if (!rows.length) {
+    tbody.innerHTML = '<tr><td colspan="8" class="empty-cell">لا توجد مكالمات بعد</td></tr>';
     return;
   }
   tbody.innerHTML = '';
-  callsState.forEach((c, i) => {
-    const created = c.createdAt ? fmtDate(c.createdAt) : '—';
-    let duration = '—';
-    if (c.startedAt && c.endedAt) {
-      const start = c.startedAt.toDate ? c.startedAt.toDate() : new Date(c.startedAt);
-      const end = c.endedAt.toDate ? c.endedAt.toDate() : new Date(c.endedAt);
-      const diff = Math.max(0, Math.round((end - start) / 1000));
-      duration = String(Math.floor(diff / 60)).padStart(2, '0') + ':' + String(diff % 60).padStart(2, '0');
-    }
+  rows.forEach((c, i) => {
+    const caller = esc(c.callerName || c.callerId || '—') +
+      (c.callerPhone && c.callerPhone !== c.callerName
+        ? '<div style="font-size:11px;color:var(--gray);direction:ltr">' + esc(c.callerPhone) + '</div>' : '');
+    const callee = esc(c.calleeName || c.calleeId || '—') +
+      (c.calleePhone && c.calleePhone !== c.calleeName
+        ? '<div style="font-size:11px;color:var(--gray);direction:ltr">' + esc(c.calleePhone) + '</div>' : '');
+    const reason = c.endReason ? (CALL_END_LABELS[c.endReason] || c.endReason) : '';
+    const statusCell = esc(CALL_STATUS_LABELS[c.status] || c.status || '—') +
+      (reason ? '<div style="font-size:11px;color:var(--gray)" title="' + esc(c.endReason) + '">' + esc(reason) + '</div>' : '');
+    const live = c.status === 'ongoing' || c.status === 'ringing';
     const tr = document.createElement('tr');
     tr.innerHTML =
       '<td>' + (i + 1) + '</td>' +
-      '<td>' + esc(c.callerName || c.callerId || '—') + '</td>' +
-      '<td>' + esc(callRoleLabel(c.callerRole)) + '</td>' +
-      '<td>' + esc(created) + '</td>' +
-      '<td>' + esc(CALL_STATUS_LABELS[c.status] || c.status || '—') + '</td>' +
-      '<td>' + duration + '</td>';
+      '<td><strong>' + esc(callRoleLabel(c.callerRole)) + '</strong><div>' + caller + '</div></td>' +
+      '<td>' + callee + '</td>' +
+      '<td>' + esc(c.createdAt ? fmtDate(c.createdAt) : '—') + '</td>' +
+      '<td>' + statusCell + '</td>' +
+      '<td style="direction:ltr">' + callDuration(c) + '</td>' +
+      '<td>' + esc(c.channelName ? c.channelName.substring(0, 10) : '—') + '</td>' +
+      '<td><div class="row-actions">' +
+      (live
+        ? '<button class="btn-sm no" onclick="suspendCall(\'' + esc(c.id) + '\',\'' +
+          esc(c.calleeName || c.calleePhone || c.callerName || c.id) + '\')">إيقاف</button>'
+        : '') +
+      (c.status === 'missed' || c.status === 'declined'
+        ? '<button class="btn-sm ok" onclick="callbackTarget(\'' + esc(c.id) + '\')">إعادة الاتصال</button>'
+        : '') +
+      '</div></td>';
     tbody.appendChild(tr);
   });
 }
+
+/// من السجلّ إلى الطلب مباشرة: يعيد فتح نافذة الاتصال برقم الطرف الذي كلّمنا.
+function callbackTarget(callId) {
+  const c = callsState.find((x) => x.id === callId);
+  if (!c) return;
+  const isIncoming = c.calleeId === CALL_ADMIN_ID;
+  const phone = isIncoming ? (c.callerPhone || c.callerId) : (c.calleePhone || c.calleeId);
+  const name = isIncoming ? c.callerName : c.calleeName;
+  const role = isIncoming ? c.callerRole : c.calleeRole;
+  openNewCallModal({ phone: phone, name: name, role: role });
+}
+
+/* ---------- الاستماع ---------- */
 
 function refreshCallsBadge() {
   const count = callsState.filter((c) => c.status === 'ringing' && c.calleeId === CALL_ADMIN_ID).length;
@@ -748,7 +994,7 @@ async function expireStaleCalls() {
         });
       }
     }
-  } catch {}
+  } catch (_) {}
 }
 
 function stopCallsListener() {
@@ -756,10 +1002,7 @@ function stopCallsListener() {
   stopRingTone();
   clearActiveCallTicker();
   closeActiveCallOverlay();
-  try { if (callMicTrack) { callMicTrack.close(); callMicTrack = null; } } catch {}
-  try { if (callEngine) callEngine.leave(); } catch {}
-  callEngine = null;
-  callInProgress = false;
+  teardownCall();
   activeRingCallId = null;
 }
 
@@ -768,6 +1011,176 @@ async function loadCalls() {
   callsState = snap.docs.map((d) => ({ id: d.id, ...d.data() }));
   refreshCallsBadge();
   renderCallsTable();
+}
+
+/* ---------- نافذة اتصال جديد ---------- */
+
+let callPeersLoaded = null;
+
+/** أرقام معروفة عند اللوحة، لتُنتقى بالاسم بدل النسخ من جدول آخر. */
+function loadCallPeers() {
+  if (callPeersLoaded) return callPeersLoaded;
+  callPeersLoaded = Promise.all([
+    db.collection('providers').limit(300).get(),
+    db.collection('customers').limit(300).get(),
+  ])
+    .then(([prov, cust]) => [
+      ...prov.docs.map((d) => ({ phone: d.data().phone, name: d.data().name, role: 'driver' })),
+      ...cust.docs.map((d) => ({ phone: d.data().phone, name: d.data().name, role: 'customer' })),
+    ].filter((p) => p.phone))
+    .catch(() => []);
+  return callPeersLoaded;
+}
+
+function openNewCallModal(preset) {
+  const pre = preset || {};
+  const overlay = openModal({
+    title: 'اتصال داخل التطبيق',
+    body:
+      '<label class="modal-label">رقم المتّصل به</label>' +
+      '<input id="nc-phone" class="modal-input" list="nc-peers" maxlength="12" style="direction:ltr;text-align:left" placeholder="2233344551" value="' + esc(pre.phone || '') + '">' +
+      '<datalist id="nc-peers"></datalist>' +
+      '<label class="modal-label">الاسم (اختياري)</label>' +
+      '<input id="nc-name" class="modal-input" maxlength="60" placeholder="الاسم الذي يظهر على شاشة المتّصل به" value="' + esc(pre.name || '') + '">' +
+      '<label class="modal-label">الدور</label>' +
+      '<select id="nc-role" class="modal-input">' +
+      '<option value="customer"' + (pre.role === 'customer' ? ' selected' : '') + '>زبون</option>' +
+      '<option value="driver"' + (pre.role === 'driver' ? ' selected' : '') + '>صاحب توصيل</option>' +
+      '</select>' +
+      '<div class="incoming-mic-hint">الصوت يمشي مباشرة بين الجهازين عبر البيانات أو واي فاي: لا دقائق ولا رصيد شريحة ولا شركة وسيطة.</div>',
+    foot:
+      '<button class="modal-btn ghost" data-close>إلغاء</button>' +
+      '<button class="modal-btn ok" data-submit>اتصل</button>',
+  });
+  const phoneEl = overlay.querySelector('#nc-phone');
+  loadCallPeers().then((peers) => {
+    const list = overlay.querySelector('#nc-peers');
+    if (!list || !phoneEl.parentNode) return;
+    const seen = new Set();
+    list.innerHTML = peers
+      .filter((p) => /^[0-9]{8,12}$/.test(String(p.phone)) && !seen.has(p.phone) && seen.add(p.phone))
+      .map((p) => '<option value="' + esc(p.phone) + '">' + esc(p.name || '') + '</option>')
+      .join('');
+  });
+
+  const submit = () => {
+    const phone = (phoneEl.value || '').replace(/[^0-9]/g, '');
+    const name = (overlay.querySelector('#nc-name').value || '').trim();
+    const role = overlay.querySelector('#nc-role').value;
+    overlay.remove();
+    startAdminCall(phone, name, role);
+  };
+  overlay.querySelector('[data-submit]').addEventListener('click', submit);
+  overlay.querySelector('[data-close]').addEventListener('click', () => overlay.remove());
+  phoneEl.addEventListener('keydown', (e) => { if (e.key === 'Enter') submit(); });
+  setTimeout(() => phoneEl.focus(), 30);
+}
+
+/* ---------- سجلّ التواصل ---------- */
+
+/*
+ * **لماذا هو هنا؟** لأنّ كل ضغطة على زر الاتصال في التطبيق تكتب رحلةً في
+ * `customers/{phone}/trips`. من هذا السجلّ وحده يعرف المشرف كيف تواصل
+ * الناس فعلًا: كم مكالمةً عبرت بروتوكول التطبيق، وكم بقي عالقًا على
+ * واتساب أو شريحة الهاتف — ولا يُقرأ شيء من هذا في جدول الطلبات.
+ *
+ * **والقنوات القديمة تُعرض لا تُمحى:** `sim` و`whatsapp` لم يعد التطبيق
+ * ينتجهما بعد حذف الجسر إلى شريحة الهاتف، و`agora` اسم رحلات ما قبل
+ * بروتوكول التطبيق. بقاؤها في الشاشة هي الدلالة على أن الانتقال تمّ.
+ */
+
+const TRIP_CHANNEL_META = {
+  inapp: { label: 'اتصال التطبيق', cls: 'completed' },
+  agora: { label: 'اتصال قديم', cls: 'offline' },
+  whatsapp: { label: 'واتساب', cls: 'accepted' },
+  sim: { label: 'شريحة الهاتف', cls: 'pending' },
+};
+
+let tripsState = [];
+
+async function loadTrips() {
+  const sel = $('#trips-customer');
+  const body = $('#trips-body');
+  if (!sel || !body) return;
+
+  if (!customersState.length) {
+    const snap = await db.collection('customers').limit(500).get();
+    customersState = snap.docs.map((d) => ({ id: d.id, ...d.data() }));
+  }
+  const keep = sel.value;
+  sel.innerHTML = customersState
+    .slice()
+    .sort((a, b) => String(a.name || a.phone || '').localeCompare(String(b.name || b.phone || ''), 'ar'))
+    .map((c) => {
+      const phone = c.phone || c.id;
+      return '<option value="' + esc(phone) + '">' + esc((c.name || 'بلا اسم') + ' — ' + phone) + '</option>';
+    })
+    .join('');
+  if (keep) sel.value = keep;
+
+  const phone = sel.value;
+  if (!phone) {
+    tripsState = [];
+    body.innerHTML = '<tr><td colspan="6" class="empty-cell">لا زبائن بعد</td></tr>';
+    renderTripsSummary();
+    return;
+  }
+  const snap = await db.collection('customers').doc(phone)
+    .collection('trips').orderBy('createdAt', 'desc').limit(100).get();
+  tripsState = snap.docs.map((d) => ({ id: d.id, ...d.data() }));
+  renderTrips();
+}
+
+function renderTripsSummary() {
+  const el = $('#trips-summary');
+  if (!el) return;
+  const counts = { inapp: 0, legacy: 0 };
+  tripsState.forEach((t) => {
+    if (t.channel === 'inapp') counts.inapp += 1;
+    else counts.legacy += 1;
+  });
+  el.innerHTML =
+    '<div class="stat-card"><div class="stat-label">تواصل مسجّل</div><div class="stat-value">' + tripsState.length + '</div></div>' +
+    '<div class="stat-card"><div class="stat-label">بروتوكول التطبيق</div><div class="stat-value">' + counts.inapp + '</div></div>' +
+    '<div class="stat-card blue"><div class="stat-label">قنوات قديمة</div><div class="stat-value">' + counts.legacy + '</div></div>';
+}
+
+function renderTrips() {
+  const body = $('#trips-body');
+  if (!body) return;
+  renderTripsSummary();
+  if (!tripsState.length) {
+    body.innerHTML = '<tr><td colspan="6" class="empty-cell">لا تواصل مسجّل لهذا الزبون</td></tr>';
+    return;
+  }
+  body.innerHTML = tripsState.map((t, i) => {
+    const meta = TRIP_CHANNEL_META[t.channel] || { label: t.channel || 'غير معروفة', cls: 'offline' };
+    const name = t.driverName || t.driverPhone || '—';
+    const avatar = t.driverPhoto
+      ? '<img class="avatar" alt="" src="data:image/jpeg;base64,' + esc(t.driverPhoto) + '">'
+      : '<span class="avatar avatar-fallback">' + esc(String(name).trim().charAt(0) || '?') + '</span>';
+    const dist = typeof t.distanceKm === 'number'
+      ? t.distanceKm.toFixed(1) + ' كم'
+      : '—';
+    return '<tr>' +
+      '<td>' + (i + 1) + '</td>' +
+      '<td>' + esc(t.createdAt ? fmtDate(t.createdAt) : '—') + '</td>' +
+      '<td><div class="cell-user">' + avatar +
+      '<div><strong>' + esc(name) + '</strong>' +
+      '<div style="font-size:11px;color:var(--gray);direction:ltr">' + esc(t.driverPhone || '—') + '</div></div></div></td>' +
+      '<td style="direction:ltr">' + dist + '</td>' +
+      '<td><span class="badge ' + meta.cls + '">' + esc(meta.label) + '</span></td>' +
+      '<td><div class="row-actions">' +
+      '<button class="btn-sm ok" onclick="callTripDriver(\'' + esc(t.driverPhone || '') + '\',\'' + esc(t.driverName || '') + '\')">اتصل به</button>' +
+      '</div></td>' +
+      '</tr>';
+  }).join('');
+}
+
+/// من السجلّ إلى المكالمة نفسها: يفتح نافذة الاتصال برقم صاحب التوصيل.
+function callTripDriver(phone, name) {
+  if (!phone) { toast('هذه الرحلة بلا رقم صاحب توصيل.', true); return; }
+  openNewCallModal({ phone: phone, name: name, role: 'driver' });
 }
 
 /* ---------- الدخول ---------- */
@@ -1166,6 +1579,7 @@ async function loadView(name) {
     if (name === 'driverRequests') await loadDriverRequests();
     if (name === 'orders') await loadOrders();
     if (name === 'calls') await loadCalls();
+    if (name === 'trips') await loadTrips();
     if (name === 'providers') await loadProviders();
     if (name === 'customers') await loadCustomers();
     if (name === 'areas') await loadAreas();
@@ -2803,6 +3217,17 @@ document.querySelectorAll('#driverreq-seg .seg-btn').forEach((b) =>
     loadDriverRequests();
   })
 );
+
+/* فلاتر سجل المكالمات: التصفية من الذاكرة، فلا إعادة قراءة للقاعدة. */
+document.querySelectorAll('#calls-seg .seg-btn').forEach((b) =>
+  b.addEventListener('click', () => {
+    document.querySelectorAll('#calls-seg .seg-btn').forEach((x) => x.classList.remove('active'));
+    b.classList.add('active');
+    setCallsFilter(b.dataset.status);
+  })
+);
+
+$('#trips-customer').addEventListener('change', () => loadTrips());
 
 let searchT = null;
 $('#orders-search').addEventListener('input', () => {
