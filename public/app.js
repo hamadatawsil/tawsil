@@ -7,11 +7,129 @@ let ordersState = [];
 let providersState = [];
 let customersState = [];
 let driverReqState = [];
+/* ---------- درجات المشرفين: من يلمس المال، ومن يقرأ فقط ---------- */
+
+/*
+ * **والدرجةُ حرسٌ في اللوحة لا قفلٌ في القاعدة:** قاعدةُ Firestore تملك
+ * المشرفَ كلَّه بدرجةٍ واحدة — أيُّ مشرفٍ موقّعٍ يقدر أن يكتب. ولو ضيّقنا
+ * القاعدةَ إلى «المالك وحده» لكان أسرعُ طريقٍ إلى بابٍ لا يُفتح: كلُّ حسابٍ
+ * قديمٍ لا لفظَ «مالك» في مستنده، فلو طُلب اللفظُ من السحابة لأُغلق التعيينُ
+ * ولا أحدَ يملك أن يفتحه. فالسلوكُ يُضبَط هنا، حيث يراه المشرفُ ويُصحّحه
+ * ويسجّله، لا هناك حيث لا يُرى ولا يُراجَع.
+ *
+ * **وبلا مالكٍ لا حارس:** ما لم يكن في النظام مالكٌ بعدُ فاللوحةُ بغير
+ * حارسٍ يحمي التعيين، وأولُ داخلٍ يعلن نفسَه مالكًا — مرةً واحدة، ثم ينحصر
+ * كلُّ تعيينٍ وتبديلٍ في يده.
+ */
+const ROLE_LABELS = { owner: 'مالك النظام', admin: 'مشرف', viewer: 'مطالع' };
+
+/** درجةٌ كما تُفهم: المجهولُ والقديمُ سواءٌ — مشرفٌ كاملُ اليد. */
+function roleOf(a) {
+  const r = a && typeof a.role === 'string' ? a.role.trim() : '';
+  return r === 'owner' || r === 'viewer' ? r : 'admin';
+}
+
+function myRole() { return roleOf(ADMIN); }
+function isOwner() { return myRole() === 'owner'; }
+function canWrite() { return myRole() !== 'viewer'; }
+function myUid() { return String((ADMIN && (ADMIN.uid || ADMIN.id)) || ''); }
+
+/**
+ * البوابةُ الوحيدة للأفعال: تُسكت الفعلَ وتقول سببَه بصوتٍ واحد، فلا يبقى
+ * زرٌّ يعمل لرجلٍ ولا يعمل لآخر بلا أن يُقال له.
+ */
+function needRight(right, what) {
+  if (right === 'write' && !canWrite()) {
+    toast('درجتُك للاطّلاع فقط: لا تعديلَ في شيءٍ من البيانات', true);
+    return false;
+  }
+  if (right === 'owner' && !isOwner()) {
+    toast('هذا للمالك وحده: ' + what, true);
+    return false;
+  }
+  return true;
+}
+
+/*
+ * **جدولٌ واحد بدل حارسٍ في كل دالة:** الأفعالُ تُنادى من نصوص `onclick`
+ * فيصفها المُنادي من النافذة، فلفُّ الاسمِ الواحد يلفُّ كلَّ مواضع النداء
+ * معه — وبهذا لا يُنسى بابٌ لأن البابَ ليس عادتَ كاتبٍ بل شيئًا يُقرأ من
+ * قائمةٍ واحدة.
+ */
+const RIGHT_OF = {
+  writeAccess: 'write',
+  accessAction: 'write',
+  offerTrialTo: 'write',
+  grantTrialBatch: 'write',
+  backfillAccess: 'write',
+  finishRenewal: 'write',
+  reviewRenewal: 'write',
+  reviewDriverRequest: 'write',
+  deleteDriverRequest: 'write',
+  expelDriver: 'write',
+  openDriverWarning: 'write',
+  saveReviewDocs: 'write',
+  reviewRequest: 'write',
+  deleteRequest: 'write',
+  deleteAllRequests: 'write',
+  saveProvider: 'write',
+  deleteProvider: 'write',
+  addOrder: 'write',
+  editOrder: 'write',
+  deleteOrder: 'write',
+  assignOrder: 'write',
+  changeOrderStatus: 'write',
+  addArea: 'write',
+  editArea: 'write',
+  deleteArea: 'write',
+  editCustomer: 'write',
+  toggleCustomer: 'write',
+  deleteCustomer: 'write',
+  openNewCallModal: 'write',
+  startAdminCall: 'write',
+  hangupCall: 'write',
+  suspendCall: 'write',
+  approveAdminRequest: 'owner',
+  declineAdminRequest: 'owner',
+  removeAdmin: 'owner',
+  setAdminRole: 'owner',
+  resetAdminPassword: 'owner',
+};
+
+/** يلفُّ أسماءَ الجدول بحارس الدرجة — تُستدعى مرةً واحدة عند الإقلاع. */
+function guardRights() {
+  Object.keys(RIGHT_OF).forEach((name) => {
+    const original = window[name];
+    if (typeof original !== 'function') {
+      console.warn('[rights] اسمٌ في الجدول بلا دالة:', name);
+      return;
+    }
+    const right = RIGHT_OF[name];
+    window[name] = function () {
+      if (!needRight(right, name)) return undefined;
+      return original.apply(null, arguments);
+    };
+  });
+}
+
+/** ما يراه الرأسُ والجنبُ من درجةٍ: لا زرٌّ لمالكٍ ولا شاشةُ مالٍ لمطالع. */
+function applyRoleChrome() {
+  const role = myRole();
+  const roleEl = $('#user-role');
+  if (roleEl) {
+    roleEl.textContent = ROLE_LABELS[role] + (role === 'viewer' ? ' · للاطّلاع فقط' : '');
+  }
+  document.querySelectorAll('.nav-item').forEach((b) => {
+    const v = b.dataset.view;
+    const ownerOnly = v === 'settings' || v === 'admins';
+    b.style.display = ownerOnly && !isOwner() ? 'none' : '';
+  });
+}
 
 /* ---------- إعدادات المكالمات: بروتوكول التطبيق نفسه ---------- */
 const CALL_ADMIN_ID = 'admin';
 const RING_TIMEOUT_MS = 60000;
-const RUN_SHA = 'v20261025-4';
+const RUN_SHA = 'v20261025-7';
 
 /// مستند الإشارة: الاسم نفسه الذي يقرؤه `call_service_inapp.dart` في الجوّال.
 const SIGNAL_COLLECTION = 'call_signal';
@@ -1346,21 +1464,25 @@ async function handleAdminRequest() {
   }
 }
 
-async function approveAdminRequest(uid) {
+async function approveAdminRequest(uid, role) {
   const req = await db.collection('admin_requests').doc(uid).get();
   if (!req.exists) return;
   const d = req.data();
+  // **والدرجة تُختار عند القبول لا بعده:** «مطالع» من اليوم الأول يعني أن
+  // أحداً لا يدخل اللوحة بيده الكاملة ثم يُنزع منه ما لم يعرف أنه سيُنزع.
+  const r = roleOf({ role });
   await db.collection('admins').doc(uid).set({
     uid,
     email: d.email || '',
     username: d.email || '',
     full_name: d.full_name || '',
-    role: 'admin',
+    role: r,
     createdAt: firebase.firestore.FieldValue.serverTimestamp(),
   });
   await db.collection('admin_requests').doc(uid).delete();
-  logActivity('قبول مشرف جديد', d.full_name || d.email || uid);
-  toast('تم إعطاء الصلاحية: ' + (d.full_name || d.email));
+  logActivity('قبول مشرف جديد', (d.full_name || d.email || uid) + ' · ' + ROLE_LABELS[r]);
+  toast('تم إعطاء الصلاحية (' + ROLE_LABELS[r] + '): ' + (d.full_name || d.email || uid));
+  applyRoleChrome();
   loadAdmins();
 }
 
@@ -1374,14 +1496,26 @@ async function declineAdminRequest(uid) {
 }
 
 async function removeAdmin(uid) {
-  if (uid === ADMIN.uid) return toast('لا يمكنك إزالة نفسك', true);
-  if (!confirm('إزالة هذه الصلاحية؟')) return;
+  if (uid === myUid()) return toast('لا يمكنك إزالة نفسك', true);
   const doc = await db.collection('admins').doc(uid).get();
   const who = doc.exists ? (doc.data().full_name || doc.data().email) : uid;
-  await db.collection('admins').doc(uid).delete();
-  logActivity('إزالة مشرف', who);
-  toast('أُزيلت الصلاحية');
-  loadAdmins();
+  // **ونافذةُ اللوحة لا نافذةُ المتصفح:** فعلٌ يعزل رجلاً عن العمل لا
+  // يُختصر بسطرٍ رماديٍّ في شريط العنوان، فالواحدة تُقرأ وال أخرى تُغلق
+  // بالخطأ وهي لا تقول ماذا يحدث للمعزول.
+  askConfirm(
+    'إزالة صلاحية مشرف',
+    'يُزال «<strong>' + esc(who) + '</strong>» من قائمة المشرفين: لا يستطيع ' +
+    'دخول اللوحة من بعده، ويبقى حسابه في النظام كما هو للاطّلاع على ما فعل.',
+    async () => {
+      try {
+        await db.collection('admins').doc(uid).delete();
+        await logActivity('إزالة مشرف', who);
+        toast('أُزيلت الصلاحية');
+        loadAdmins();
+      } catch (err) { toast(err.message, true); }
+    },
+    { danger: true, confirm: 'إزالة' }
+  );
 }
 
 async function loadAdmins() {
@@ -1389,34 +1523,134 @@ async function loadAdmins() {
   const admBody = $('#admins-body');
   if (!reqBody || !admBody) return;
 
-  const reqs = await db.collection('admin_requests').get();
+  const [reqs, adm] = await Promise.all([
+    db.collection('admin_requests').get(),
+    db.collection('admins').get(),
+  ]);
   const reqsState = reqs.docs.map((d) => ({ id: d.id, ...d.data() }));
+  const admState = adm.docs.map((d) => ({ id: d.id, ...d.data() }));
+  // **وجودُ المالك هو الذي يُغلق بابَ التعيين:** ما لم يكن فاللوحةُ بلا
+  // حارس، ويُعلَن أولُ داخلٍ فيها مالكًا — ثم يحصرُ كلَّ شيءٍ في يده.
+  const ownerExists = admState.some((a) => roleOf(a) === 'owner');
   setNavBadge('admins', reqsState.length);
+
+  const grantBtn = (id, role, label) =>
+    '<button class="btn-sm ok" onclick="approveAdminRequest(\'' + id + '\',\'' + role + '\')">' + label + '</button>';
+  const mayGrant = isOwner() || !ownerExists;
   reqBody.innerHTML = reqsState.length
     ? reqsState.map((r) =>
         '<tr><td><strong>' + esc(r.full_name || '—') + '</strong></td>' +
-        '<td>' + esc(r.email || '—') + '</td>' +
+        '<td style="direction:ltr">' + esc(r.email || '—') + '</td>' +
         '<td>' + fmtDateShort(r.requested_at) + '</td>' +
         '<td><div class="row-actions">' +
-        '<button class="btn-sm ok" onclick="approveAdminRequest(\'' + r.id + '\')">قبول</button>' +
-        '<button class="btn-sm no" onclick="declineAdminRequest(\'' + r.id + '\')">رفض</button>' +
+        (mayGrant ? grantBtn(r.id, 'admin', 'قبول مشرفًا') : '') +
+        (mayGrant ? grantBtn(r.id, 'viewer', 'قبول مطالعًا') : '') +
+        (ownerExists ? '' : grantBtn(r.id, 'owner', 'قبول مالكًا')) +
+        (isOwner() ? '<button class="btn-sm no" onclick="declineAdminRequest(\'' + r.id + '\')">رفض</button>' : '') +
+        (isOwner() || !ownerExists ? '' : '<span class="badge inactive">للاطّلاع — القبولُ للمالك</span>') +
         '</div></td></tr>').join('')
     : '<tr class="empty-row"><td colspan="4">لا توجد طلبات</td></tr>';
 
-  const adm = await db.collection('admins').get();
-  const admState = adm.docs.map((d) => ({ id: d.id, ...d.data() }));
+  const roleCell = (a) => {
+    const role = roleOf(a);
+    if (!isOwner()) return '<span class="badge inactive">' + ROLE_LABELS[role] + '</span>';
+    return '<select class="modal-input" style="width:auto;padding:2px 8px" ' +
+      'onchange="setAdminRole(\'' + a.id + '\', this.value)">' +
+      ['owner', 'admin', 'viewer'].map((r) =>
+        '<option value="' + r + '"' + (r === role ? ' selected' : '') + '>' + ROLE_LABELS[r] + '</option>').join('') +
+      '</select>';
+  };
+
   admBody.innerHTML = admState.length
-    ? admState.map((a) =>
-        '<tr><td><strong>' + esc(a.full_name || '—') + '</strong></td>' +
-        '<td>' + esc(a.email || a.username || '—') + '</td>' +
-        '<td>' + esc(a.role || 'admin') + '</td>' +
+    ? admState.map((a) => {
+        const me = a.id === ADMIN.uid || a.id === myUid();
+        return '<tr><td><strong>' + esc(a.full_name || '—') + '</strong>' +
+        (me ? ' <span class="badge active">أنت</span>' : '') + '</td>' +
+        '<td style="direction:ltr">' + esc(a.email || a.username || '—') + '</td>' +
+        '<td>' + roleCell(a) + '</td>' +
         '<td>' + fmtDateShort(a.createdAt) + '</td>' +
         '<td><div class="row-actions">' +
-        (a.id === ADMIN.uid
-          ? '<span class="badge inactive">أنت</span>'
-          : '<button class="btn-sm no" onclick="removeAdmin(\'' + a.id + '\')">إزالة</button>') +
-        '</div></td></tr>').join('')
+        (me && !ownerExists ? '<button class="btn-sm ok" onclick="claimOwner()">اجعلني مالكًا</button>' : '') +
+        (isOwner() ? '<button class="btn-sm blue" onclick="resetAdminPassword(\'' + a.id + '\')">رابط كلمة المرور</button>' : '') +
+        (isOwner() && !me ? '<button class="btn-sm no" onclick="removeAdmin(\'' + a.id + '\')">إزالة</button>' : '') +
+        '</div></td></tr>';
+      }).join('')
     : '<tr class="empty-row"><td colspan="5">لا يوجد مشرفون</td></tr>';
+}
+
+/**
+ * درجةُ مشرفٍ تُبدَّل بعد القبول: للمالك وحده. والدرجةُ ليست زينةً —
+ * «مطالع» يعني أن كلَّ زرٍّ في اللوحة يُقال له سببُه ولا يُنفَّذ.
+ */
+async function setAdminRole(uid, role) {
+  const r = roleOf({ role });
+  try {
+    await db.collection('admins').doc(uid).update({ role: r });
+    if (uid === myUid()) {
+      ADMIN.role = r;
+      sessionStorage.setItem('hamada_admin', JSON.stringify(ADMIN));
+    }
+    await logActivity('تغيير درجة مشرف', r);
+    toast('الدرجة الآن: ' + ROLE_LABELS[r]);
+    applyRoleChrome();
+    loadAdmins();
+  } catch (err) { toast(err.message, true); }
+}
+
+/** أولُ داخلٍ يصبح المالك، ولا شيءَ بعده يُبدَّل إلا بيده. */
+function claimOwner() {
+  askConfirm(
+    'إعلان المالك',
+    'لا مالكَ في النظام بعد. أجعلْ «<strong>' + esc((ADMIN && ADMIN.full_name) || 'أنت') + '</strong>» مالكًا؟ ' +
+    'بعدها لا تُبدَّل درجةٌ ولا تُضاف صلاحيةٌ إلا من يده.',
+    async () => {
+      try {
+        // **الجدولُ قد يكون قديمًا:** لو سبق رجلٌ وضغط الإعلانَ قبله، فالبابُ
+        // الذي يفتحُ مالكًا ثانٍ يجب أن يُغلق هنا، لا عند الزرِّ وحده.
+        const owners = await db.collection('admins').where('role', '==', 'owner').get();
+        if (owners.docs.length) {
+          toast('المالكُ معلَنٌ بالفعل: «' + (owners.docs[0].data().full_name || owners.docs[0].id) + '»', true);
+          loadAdmins();
+          return;
+        }
+        await db.collection('admins').doc(myUid()).update({ role: 'owner' });
+        ADMIN.role = 'owner';
+        sessionStorage.setItem('hamada_admin', JSON.stringify(ADMIN));
+        await logActivity('إعلان مالك النظام', (ADMIN && ADMIN.full_name) || '');
+        toast('أنت الآن مالكُ النظام');
+        applyRoleChrome();
+        loadAdmins();
+      } catch (err) { toast(err.message, true); }
+    },
+    { confirm: 'إعلان' }
+  );
+}
+
+/**
+ * كلمةُ سرٍّ لا تعرفها اللوحة: تُرسَل رسالةُ تعيينٍ من Firebase إلى بريد
+ * المشرف. واللوحةُ التي تخزّن كلمةَ سرٍّ في جدولٍ يقرؤه كلُّ مشرفٍ قد
+ * نشرت أسرارَ الدخول على نفسها — وهذا بابٌ كان مفتوحًا وانغلق.
+ */
+async function resetAdminPassword(uid) {
+  try {
+    const doc = await db.collection('admins').doc(uid).get();
+    if (!doc.exists) return toast('لا يوجد هذا المشرف', true);
+    const email = String(doc.data().email || '');
+    if (!email) return toast('لا بريد مسجَّل لهذا المشرف', true);
+    askConfirm(
+      'إعادة تعيين كلمة المرور',
+      'يُرسل النظامُ رسالةً إلى <strong style="direction:ltr">' + esc(email) + '</strong> ' +
+      'فيها رابطُ تعيين كلمةٍ جديدة. لا تُرسل اللوحةُ كلمةً ولا تعرف واحدة.',
+      async () => {
+        try {
+          await auth.sendPasswordResetEmail(email);
+          await logActivity('إرسال رابط كلمة مرور', doc.data().full_name || email);
+          toast('أُرسل الرابط إلى البريد');
+        } catch (err) { toast(err.message, true); }
+      },
+      { confirm: 'إرسال الرابط' }
+    );
+  } catch (err) { toast(err.message, true); }
 }
 
 /* ---------- الزبائن الجدد ---------- */
@@ -1552,7 +1786,7 @@ function enterApp() {
   $('#login-screen').classList.add('hidden');
   $('#app-screen').classList.remove('hidden');
   $('#user-name').textContent = ADMIN.full_name;
-  $('#user-role').textContent = ADMIN.role === 'owner' ? 'مالك النظام' : ADMIN.role;
+  applyRoleChrome();
   switchView('dashboard');
   loadView('dashboard');
   startClock();
@@ -1616,7 +1850,7 @@ async function loadView(name) {
 const STAT_META = [
   { key: 'orders_today', label: 'طلبات اليوم', sub: null },
   { key: 'pending_requests', label: 'اشتراكات قيد المراجعة', sub: null, cls: 'gold' },
-  { key: 'active_providers', label: 'أصحاب توصيل متصلون', sub: null },
+  { key: 'visible_providers', label: 'يظهر للزبائن الآن', sub: null },
   { key: 'orders_total', label: 'إجمالي الطلبات', sub: null },
   { key: 'customers', label: 'الزبائن', sub: null, cls: 'blue' },
   { key: 'providers', label: 'أصحاب التوصيل', sub: null },
@@ -1643,12 +1877,22 @@ async function loadDashboard() {
 
   const revenueToday = ordersToday.filter(o => o.status === 'completed').reduce((s, o) => s + (Number(o.total) || 0), 0);
   const revenue = allOrders.filter(o => o.status === 'completed').reduce((s, o) => s + (Number(o.total) || 0), 0);
-  const activeProviders = providersSnap.docs.filter(d => d.data().is_connected).length;
+  // **وظهورُهم كما هو لا كما تظنُّ اللوحة:** كانت البطاقةُ تعدّ «متصلين»
+  // من حقلٍ في جدول أصحاب التوصيل لم يعد أحدٌ يكتبه منذ أن صار الظهورُ
+  // ببطاقة القرار، فرقمُها ثابتٌ على صفرٍ أو على عهدٍ قديم. العددُ الآن
+  // يُقرأ من البطاقة نفسها التي يقرأها الهاتف.
+  const dashPhones = Array.from(new Set(
+    providersSnap.docs.map((d) => String(d.data().phone || '')).filter(Boolean)
+  ));
+  const dashAccess = await loadAccess(dashPhones);
+  const visibleProviders = dashPhones.filter(
+    (ph) => accessIsVisible(dashAccess[ph])
+  ).length;
 
   const stats = {
     orders_today: ordersToday.length,
     pending_requests: pendingSnap.size,
-    active_providers: activeProviders,
+    visible_providers: visibleProviders,
     orders_total: allOrders.length,
     customers: customersSnap.size,
     providers: providersSnap.size,
@@ -2263,7 +2507,10 @@ async function reviewDriverRequest(id, action) {
   askConfirm(
     'قبول طلب التسجيل',
     'سيُنشأ حساب لصاحب التوصيل "<strong>' + esc(label) + '</strong>" بكلمة المرور التي اختارها، ' +
-      'ويستطيع الدخول بعدها مباشرة. هل تريد القبول؟',
+      'فيدخل التطبيق بعدها مباشرة.<br><br>' +
+      '<strong>لن يظهر للزبائن</strong>: القبولُ وحده لا يُعطي ظهوراً. ' +
+      'امنحه من «لوحة التحكّم» في جدول أصحاب التوصيل فترةً تجريبية بمدةٍ تحددها، ' +
+      'أو انتظر حتى يدفع اشتراكه الشهري. هل تريد القبول؟',
     async () => {
       try {
         const ref = db.collection('driver_applications').doc(id);
@@ -2869,7 +3116,8 @@ async function loadProviders() {
   providersState = snap.docs.map(d => ({ id: d.id, ...d.data() }));
   const body = $('#providers-body');
   if (!providersState.length) {
-    body.innerHTML = '<tr class="empty-row"><td colspan="12">لا يوجد أصحاب توصيل</td></tr>';
+    setAccessSummary(0, 0);
+    body.innerHTML = '<tr class="empty-row"><td colspan="10">لا يوجد أصحاب توصيل</td></tr>';
     return;
   }
   // **ظهورهم للزبائن من `driver_public`:** أرقامٌ مفتّحة على مستنداتها،
@@ -2885,6 +3133,10 @@ async function loadProviders() {
   // يقرأ `providers` وحده، فيرى المشرف جدولًا يقول «نشط» وصاحبَ الرقم في
   // لائحة الزبائن محذوف. فالعمودان معًا، والجواب واحد.
   providersAccess = await loadAccess(providerPhones);
+  const shown = providersState.filter(
+    (p) => accessIsVisible(providersAccess[String(p.phone || '')])
+  ).length;
+  setAccessSummary(providersState.length, shown);
   body.innerHTML = providersState
     .map((p) =>
       '<tr>' +
@@ -2901,17 +3153,15 @@ async function loadProviders() {
       '<td>' + handoverCell(handovers[String(p.phone)]) + '</td>' +
       '<td>' + esc(p.plate || '') + '</td>' +
       '<td>★ ' + esc(p.rating || 0) + '</td>' +
-      '<td><span class="badge ' + (p.is_connected ? 'online' : 'offline') + '">' + (p.is_connected ? 'متصل' : 'غير متصل') + '</span></td>' +
-      '<td><span class="badge ' + (p.subscription_active ? 'active' : 'inactive') + '">' + (p.subscription_active ? 'نشط' : 'موقوف') + '</span></td>' +
-      '<td>' + fmtDateShort(p.subscription_end) + '</td>' +
-      '<td>' + accessCell(providersAccess[String(p.phone)]) + '</td>' +
+      '<td>' + accessEndCell(providersAccess[String(p.phone)]) + '</td>' +
+      '<td>' + accessCell(providersAccess[String(p.phone || '')]) + '</td>' +
       '<td><div class="row-actions">' +
       '<button class="btn-sm blue" onclick="openAccessPanel(\'' + esc(p.phone) + '\')">لوحة التحكّم</button>' +
       '<button class="btn-sm blue" onclick="editProvider(\'' + p.id + '\')">تعديل</button>' +
-      '<button class="btn-sm blue" onclick="toggleProvider(\'' + p.id + '\',\'is_connected\')">' + (p.is_connected ? 'إيقاف الاتصال' : 'تفعيل الاتصال') + '</button>' +
-      '<button class="btn-sm ' + (p.subscription_active ? 'no' : 'ok') + '" onclick="toggleProvider(\'' + p.id + '\',\'subscription_active\')">' + (p.subscription_active ? 'إيقاف الاشتراك' : 'تفعيل الاشتراك') + '</button>' +
-      '<button class="btn-sm ' + (p.blocked ? 'ok' : 'no') + '" onclick="toggleProvider(\'' + p.id + '\',\'blocked\')">' + (p.blocked ? 'رفع الحظر' : 'حظر') + '</button>' +
-      '<button class="btn-sm no" onclick="deleteProvider(\'' + p.id + '\')">حذف</button>' +
+      (canWrite()
+        ? quickAccessButtons(String(p.phone || ''), providersAccess[String(p.phone || '')]) +
+          '<button class="btn-sm no" onclick="deleteProvider(\'' + p.id + '\')">حذف</button>'
+        : '') +
       '</div></td>' +
       '</tr>'
     )
@@ -2931,6 +3181,9 @@ function editProvider(id) {
     '<input id="ep-name" type="text" value="' + esc(p.name) + '">' +
     '<label>رقم الهاتف</label>' +
     '<input id="ep-phone" type="text" value="' + esc(p.phone) + '">' +
+    '<p class="login-sub">الرقمُ هنا هو صلةُ الوصل بين اللوحة وهاتفِه: إن غيّرته ' +
+    'انتقلت بطاقةُ قرارِه إلى الرقم الجديد، فاحتفظ بالفترة والملاحظة كما هي. ' +
+    'أما رقمُ الذي يدخُل به صاحبُ التوصيل إلى تطبيقِه فمكانٌ آخر، ولا يُبدَّل من هنا.</p>' +
     '<label>رقم اللوحة</label>' +
     '<input id="ep-plate" type="text" value="' + esc(p.plate || '') + '">' +
     '</div>' +
@@ -2944,6 +3197,8 @@ function editProvider(id) {
 
 async function saveProvider(btn, id) {
   const overlay = btn.closest('.doc-lightbox');
+  const row = providersState.find((x) => String(x.id) === String(id)) || {};
+  const oldPhone = String(row.phone || '').trim();
   const name = overlay.querySelector('#ep-name').value.trim();
   const phone = overlay.querySelector('#ep-phone').value.trim();
   const plate = overlay.querySelector('#ep-plate').value.trim();
@@ -2951,6 +3206,7 @@ async function saveProvider(btn, id) {
   btn.disabled = true;
   try {
     await db.collection('providers').doc(id).update({ name, phone, plate });
+    await moveAccessCard(oldPhone, phone);
     await logActivity('تعديل بيانات', name);
     toast('تم حفظ التعديل');
     overlay.remove();
@@ -2958,37 +3214,91 @@ async function saveProvider(btn, id) {
   } catch (err) { btn.disabled = false; toast(err.message, true); }
 }
 
+/**
+ * بطاقةُ القرار مكتوبةٌ بالرقم، فتغييرُ الرقم بلا نقلٍ يتيمَّم القرارَ في
+ * مكانه القديم: اللوحةُ تراه، والهاتفُ يسأل بالرقم الجديد فلا يجد شيئًا
+ * فيُخفى الرجلُ بغير قرار. والنقلُ هنا كتابةٌ ثم حذفٌ — والكتابةُ وحدها
+ * تترك بطاقتين لرجلٍ واحد، أحسنُهما للقديم.
+ */
+async function moveAccessCard(fromPhone, toPhone) {
+  if (!fromPhone || !toPhone || fromPhone === toPhone) return false;
+  try {
+    const ref = db.collection(ACCESS_COLLECTION).doc(fromPhone);
+    const snap = await ref.get();
+    if (!snap.exists) return false;
+    await db.collection(ACCESS_COLLECTION).doc(toPhone).set(snap.data(), { merge: true });
+    await ref.delete();
+    await logActivity('نقل بطاقة قرار إلى رقم جديد', fromPhone + ' ← ' + toPhone);
+    return true;
+  } catch (err) {
+    // والنقلُ لا يبطلُ حفظَ البيانات: بقِيَ القرارُ باسمه القديم فاللوحة
+    // تُخبره، والرقمُ الجديد بلا بطاقةٍ مخفيٌّ لا يظهر خطأً لأحد.
+    toast('حُفظ التعديل لكن لم تُنقل البطاقة: ' + err.message, true);
+    return false;
+  }
+}
+
 async function deleteProvider(id) {
   const p = providersState.find((x) => x.id === id);
   if (!p) return;
+  // **والرسالةُ تقول ما يحدُث فعلاً:** كانت تعدُ بأن الحسابَ يزول والدخولَ
+  // يُمنع، بينما الحذفُ لا يمسّ حسابَ الدخول الذي يسكن مكانًا آخر. فمن
+  // قرأها صدّقها، وظنّ أن رجلاً خرج من العمل وهو يعمل.
+  const phone = String(p.phone || '').trim();
   askConfirm(
-    'حذف صاحب التوصيل',
-    'هل تريد حذف "' + esc(p.name) + '" نهائياً؟<br>سيفقد حسابه وصلاحياته ولن يستطيع الدخول.',
+    'حذف من جدول اللوحة',
+    'يُحذف «<strong>' + esc(p.name) + '</strong>» من جدول أصحاب التوصيل في اللوحة، ' +
+    (phone
+      ? 'وتُسحب معه بطاقةُ قراره على الرقم <strong style="direction:ltr">' + esc(phone) + '</strong> فلا يظهر للزبائن.'
+      : 'وليس له رقمٌ في الجدول، فلا بطاقةَ تُسحب.') +
+    '<br><br><strong>حسابُه في التطبيق يبقى كما هو</strong>: يستطيع الدخولَ واستقبالَ المكالمات. ' +
+    'وإن أردتَ إغلاقَ حسابِه ومنعَ رقمِه من التسجيل فمن «تسجيل أصحاب التوصيل» — «طردٌ نهائي».',
     async () => {
       try {
-        await db.collection('providers').doc(id).delete();
-        await logActivity('حذف صاحب توصيل', p.name);
-        toast('تم حذف صاحب التوصيل');
+        const batch = db.batch();
+        batch.delete(db.collection('providers').doc(id));
+        if (phone) batch.delete(db.collection(ACCESS_COLLECTION).doc(phone));
+        await batch.commit();
+        await logActivity('حذف صاحب توصيل من اللوحة', p.name + (phone ? ' · ' + phone : ''));
+        toast(phone ? 'حُذف من اللوحة وسُحبت بطاقتُه: لا يظهر للزبائن' : 'حُذف من اللوحة');
         loadProviders();
         loadDashboard();
       } catch (err) { toast(err.message, true); }
     },
-    { danger: true, confirm: 'حذف نهائي' }
+    { danger: true, confirm: 'حذف من اللوحة' }
   );
 }
 
-async function toggleProvider(id, field) {
-  try {
-    const doc = await db.collection('providers').doc(id).get();
-    const current = doc.data()[field];
-    await db.collection('providers').doc(id).update({ [field]: !current });
-    const p = providersState.find(x => x.id === id);
-    const label = field === 'is_connected' ? 'تفعيل/إيقاف الاتصال' : field === 'subscription_active' ? 'تفعيل/إيقاف الاشتراك' : 'حظر/رفع الحظر';
-    await logActivity(label, p ? p.name : '');
-    toast('تم التحديث');
-    loadProviders();
-    loadDashboard();
-  } catch (err) { toast(err.message, true); }
+/**
+ * عمودُ نهاية الفترة: من بطاقة القرار لا من جدول اللوحة.
+ *
+ * **ومصدرٌ واحد لكل شاشة:** العمودُ كان يقرأ `providers` والعمودُ الذي
+ * بجانبه يقرأ `driver_access`، فيرى المشرف «تاريخ انتهاء» لا علاقة له
+ * بالقرار المكتوب تحته — ومرآةُ اللوحة قد تُحدَّثُ وهي لا تُنفَّذ.
+ */
+function accessEndCell(access) {
+  if (!access) return '<span class="badge inactive">لا تاريخ</span>';
+  if (access.endMs === null) return '<span class="badge inactive">لم يُكتب</span>';
+  const late = access.endMs <= Date.now();
+  return '<span class="badge ' + (late ? 'rejected' : 'active') + '">' + esc(fmtDateShort(access.endMs)) + '</span>';
+}
+
+/**
+ * زرّانِ سريعان في الصفّ، وكلاهما يكتب في بطاقة القرار.
+ *
+ * **وهنا أُزيلت ثلاثةُ مقابضَ كانت تُسمّى تحكّماً:** «تفعيل الاتصال» و
+ * «تفعيل الاشتراك» و«حظر» كانت تقلب حقولًا في جدول `providers` لا يقرأه
+ * التطبيقُ إطلاقًا — لا ظهورَ يتغيّر، ولا اتصالَ يُقطع، ولا حظرَ يسري.
+ * أخطرُ من العدم أن توهمَ بالوجود: يضغط المشرفُ «حظر» فيظنّ أنه أوقف
+ * رجلاً وهو أمام الزبائن يعمل، ثم لا يعود يشكّ في اللوحة طَوالَ يومِه.
+ * فبقيت الأزرارُ التي تُنفّذ، وسُحب ما يوهم.
+ */
+function quickAccessButtons(phone, access) {
+  const b = (action, label, cls) =>
+    '<button class="btn-sm ' + cls + '" onclick="accessAction(\'' + esc(phone) + '\',\'' + action + '\')">' + label + '</button>';
+  if (!phone) return '';
+  if (access && access.frozen) return b('unfreeze', 'رفع التجميد', 'ok');
+  return b('freeze', 'تجميد الحساب', 'no');
 }
 
 /* ---------- صلاحيات أصحاب التوصيل: قرار اللوحة لا نقرَة الهاتف ---------- */
@@ -3000,21 +3310,29 @@ async function toggleProvider(id, field) {
  * هو الرقم لا المعرّف — وهو الشيء الوحيد الذي يملكه صاحب التوصيل فعلاً.
  *
  * **والكتابة من هنا هي القرار، والقراءة من هناك هي التنفيذ:** اللوحة تكتب
- * `frozen` و`subscriptionActive` و`subscriptionEnd` و`callsAllowed`،
+ * `frozen` و`subscriptionActive` و`subscriptionEnd` و`callsAllowed` و`plan`،
  * وتُطفئ شاشةُ صاحب التوصيل ظهورَه نفسه حين يصلها المنع، وتسقط لائحةُ
  * الزبائن صاحبَه. فلو تُرك الحكم للوحة وحدها والعرض للتطبيق لما نُفِّذ
  * قرارٌ حتى يُعاد فتح التطبيق.
  *
- * **وبلا مستند لا منع:** من قُبل قبل أن توجد هذه اللوحة ليس له مستند،
- * فهو يعمل. واللوحة تقول ذلك صراحةً في العمود بدل أن تُسكت، لأن الحكم
- * الخفيّ أخطر من المعلَن ولو اتفقا. وزرّ «توحيد الصلاحيات» يحوّل كل
- * «بلا قرار» إلى قرارٍ مكتوب باسم صاحبه.
+ * **وبلا قرارٍ لا ظهور:** سياسة التطبيق أن صاحب التوصيل لا يظهر للزبائن
+ * حتى يكتب فيه المشرف اشتراكًا شهريًا مدفوعًا أو فترةً تجريبية. فغياب
+ * المستند ليس سماحًا بل تأجيلًا، واللوحة تقول ذلك صراحةً في العمود بدل أن
+ * تُسكت — والحكم الخفيّ أخطر من المعلَن ولو اتفقا. وزرّ «توحيد الصلاحيات»
+ * يحوّل كل «بلا قرار» إلى قرارٍ مكتوب باسم صاحبه، وهو أوّل ما يُضغَط بعد
+ * هذه القاعدة، وإلا أُظلم كل من لم تكن له بطاقة.
  */
 const ACCESS_COLLECTION = 'driver_access';
 const RENEWAL_COLLECTION = 'renewal_requests';
 
 /** مدة التمديد بالأيام: ثلاثون لا تقويمُ شهر، لئلّا يختلف الحساب. */
 const SUB_MONTH_DAYS = 30;
+
+/** مدة الفترة التجريبية الافتراضية: يسألها المشرف ويكتب ما شاء. */
+const TRIAL_DEFAULT_DAYS = 7;
+
+/** وجه المنحة: `paid` اشتراكٌ مدفوع، و`trial` تجريبية — والكلمة للهاتف. */
+const PLAN_LABELS = { paid: 'اشتراك مدفوع', trial: 'فترة تجريبية' };
 
 const RENEWAL_STATUS_LABELS = {
   pending: 'بانتظار الاعتماد',
@@ -3025,6 +3343,7 @@ const RENEWAL_STATUS_LABELS = {
 /** ما تُسمّيه اللوحة كلَّ إجراء على الصلاحية، فيظهر كذلك في سجلّ النشاط. */
 const ACCESS_ACTION_LABELS = {
   extend: 'تمديد اشتراك شهرًا',
+  trial: 'منح فترة تجريبية',
   stop: 'إيقاف اشتراك',
   start: 'تفعيل اشتراك',
   freeze: 'تجميد حساب',
@@ -3062,38 +3381,102 @@ async function loadAccess(phones) {
   unique.forEach((phone, i) => {
     const data = docs[i];
     // `null` هنا «لم يُكتب مستند»، والفرق بينه وبين «كُتب ثم حُذف» لا
-    // أثر له عند العرض: الحالتان بلا قرار، وصاحب التوصيل يعمل.
+    // أثر له عند العرض: الحالتان بلا قرار، وصاحبُ التوصيل لا يظهر للزبائن.
     if (!data) return;
     const end = data.subscriptionEnd;
     byPhone[phone] = {
       frozen: data.frozen === true,
-      active: data.subscriptionActive !== false,
+      // المفتاح لا يُفتح إلا كتابةً: هو نفس الحكم في `driver_access_service.dart`،
+      // فلو اكتفت اللوحة بـ`!== false` قالت «سارٍ» لما يراه الهاتف موقوفًا.
+      active: data.subscriptionActive === true,
       callsAllowed: data.callsAllowed !== false,
+      plan: typeof data.plan === 'string' ? data.plan.trim() : '',
       endMs: end && typeof end.toMillis === 'function' ? end.toMillis() : null,
       note: typeof data.note === 'string' ? data.note : '',
+      // والسجلُّ يُقرأ معها: لوحةٌ لا تعرف كم مرة جُرِّب هذا الرقم
+      // لوحةٌ تمنح التجريبية بوجهٍ واحد كلَّ شهرٍ بلا أن يرى أحد.
+      history: Array.isArray(data.history) ? data.history : [],
     };
   });
   return byPhone;
 }
 
-/** خلية القرار: كلمة واحدة تقول للوحة ما يراه الزبون الآن عن هذا الرقم. */
+/**
+ * هل هو ظاهرٌ للزبون الآن؟ هو الحكم نفسه الذي يمشي عليه الهاتف.
+ *
+ * **ومنعُ المكالمات إخفاءٌ لا نصفُ ظهور:** قائمةُ القريبين في التطبيق
+ * تفلتر بـ`canBeCalled`، أي بالفترة السارية والمكالمات مسموحة معًا. فلو
+ * اكتفت اللوحة بالفترة عدّتْ رقمًا لا يراه الزبون ظاهرًا، وقرأ المشرفُ
+ * عدًّا لا يطابق ما يراه صاحبُ التوصيل من رزق.
+ */
+function accessIsVisible(access) {
+  if (!access) return false;
+  if (access.frozen) return false;
+  if (access.callsAllowed === false) return false;
+  return access.active && access.endMs !== null && access.endMs > Date.now();
+}
+
+/**
+ * عدّادُ الظهور فوق جدول أصحاب التوصيل: «كم واحدًا يراه الزبون الآن».
+ *
+ * **والعدد هو أول ما يحتاجه المشرف بعد هذه القاعدة:** «بلا قرار» صار
+ * مخفيًّا، فأسوأُ ما يحدث أن تفتح اللوحةُ على أصحابِ توصيلٍ لا يُدرى أنهم
+ * أوقفوا. فالسطرُ يقول كم ظاهرٍ للزبائن وكم مخفيٌّ عنهم.
+ */
+function setAccessSummary(total, shown) {
+  const el = document.getElementById('providers-access-note');
+  if (!el) return;
+  const hidden = total - shown;
+  el.className = 'badge ' + (hidden ? 'offline' : 'active');
+  el.textContent = total
+    ? (shown + ' يظهر للزبائن · ' + hidden + ' مخفيّ')
+    : '';
+}
+
+/**
+ * خلية القرار: كلمةٌ واحدة تقول للوحة ما يراه الزبون الآن عن هذا الرقم.
+ *
+ * **«بلا قرار» لم تعد «يعمل»:** العمودُ واللائحةُ حكْمٌ واحد، فلو قالت
+ * اللوحة «يعمل» والحسابُ مخفيٌّ عند الزبون لكان للمشرف جوابان عن سؤالٍ
+ * واحد — وهو أسرع طريقٍ إلى قرارٍ يُلغى بالخطأ.
+ */
 function accessCell(access) {
-  if (!access) return '<span class="badge offline">بلا قرار · يعمل</span>';
-  if (access.frozen) return '<span class="badge rejected">مجمّد</span>';
-  if (!access.active) return '<span class="badge offline">اشتراك موقوف</span>';
-  if (access.endMs !== null && access.endMs <= Date.now()) {
-    return '<span class="badge rejected">انتهى ' + esc(fmtDateShort(access.endMs)) + '</span>';
-  }
-  const calls = access.callsAllowed
-    ? ''
-    : ' <span class="badge pending">مكالمات موقوفة</span>';
-  const rest = access.endMs === null
-    ? ''
-    : ' · ' + Math.max(0, Math.ceil((access.endMs - Date.now()) / 86400000)) + ' ي';
+  const badge = (cls, text) => '<span class="badge ' + cls + '">' + text + '</span>';
+  if (!access) return badge('offline', 'بلا قرار · لا يظهر');
   const note = access.note
     ? '<div style="font-size:11px;color:var(--gray)">' + esc(access.note) + '</div>'
     : '';
-  return '<span class="badge active">سارٍ' + esc(rest) + '</span>' + calls + note;
+  if (access.frozen) return badge('rejected', 'مجمّد · لا يظهر') + note;
+  if (access.endMs === null) return badge('offline', 'بلا فترة ممنوحة · لا يظهر') + note;
+  if (access.endMs <= Date.now()) {
+    return badge('rejected', 'انتهى ' + esc(fmtDateShort(access.endMs)) + ' · لا يظهر') + note;
+  }
+  if (!access.active) return badge('offline', 'مفتاحٌ مطفأ · لا يظهر') + note;
+  // **وجوابٌ واحد للسؤال:** لا يجوز أن يقرأ المشرف في الخلية «ظاهر» و«لا
+  // يظهر» في سطرٍ واحد، فالمنعُ قرارٌ مثله مثل الانتهاء.
+  if (access.callsAllowed === false) return badge('pending', 'فترة سارية ومكالماته موقوفة · لا يظهر') + note;
+  const plan = PLAN_LABELS[access.plan] ? ' · ' + PLAN_LABELS[access.plan] : '';
+  const left = Math.max(0, Math.ceil((access.endMs - Date.now()) / 86400000));
+  return badge('active', 'ظاهر · سارٍ ' + left + ' ي' + esc(plan)) + note;
+}
+
+/**
+ * سطرٌ في سجلِّ المنح: ما مُنح، ومقدارُه، ومَن منح.
+ *
+ * **ولماذا يُحفَظ وهو مُكرَّرٌ في سجلِّ النشاط؟** لأن سجلَّ النشاط للوحةٍ
+ * كلها، وهذا القرارُ لصاحبِ رقمٍ واحد: يسأل المشرفُ «كم مرة جرّبنا هذا
+ * الرجل؟» فلا يجد الجوابَ إلا في بطاقتِه. والنافذةُ آخرُ اثني عشر سطرًا
+ * لأن المستندَ لا يُترك ينمو إلى الأبد، والعبرةُ بما سبق الآن لا بما مضى
+ * منه عام.
+ */
+function grantHistory(access, days, plan) {
+  const prev = access && Array.isArray(access.history) ? access.history : [];
+  return prev.concat({
+    at: Date.now(),
+    days: Number(days) || 0,
+    plan: plan || '',
+    by: String((ADMIN && (ADMIN.full_name || ADMIN.username)) || ''),
+  }).slice(-12);
 }
 
 /**
@@ -3135,39 +3518,88 @@ function nextSubscriptionEnd(access, days) {
   return new Date(base + days * 86400000);
 }
 
-/** لوحة التحكم في رقم: كل ما يملكه المشرف في حسابه، في مكان واحد. */
+/**
+ * سطرُ السجلِّ في لوحة التحكّم: آخرُ ما مُنح لهذا الرقم، بمنحه.
+ *
+ * **والعددُ هو مقصدُه:** التجريبيةُ يدٌ للمشرف يمنحها متى شاء، لكن رجلًا
+ * جُرِّب ستَّ مراتٍ ثم «جُرِّب» سبعةً وثلاثين يومًا ليس مجرَّبًا — هو
+ * مشتركٌ لا يدفع. واللوحةُ التي لا تقول ذلك تجعل معنى الاشتراك المدفوع
+ * في يد مَن يُكثر من العطاء.
+ */
+function grantHistoryLine(access) {
+  const list = access && Array.isArray(access.history) ? access.history : [];
+  if (!list.length) {
+    return '<p class="login-sub" style="margin:0 0 10px">لا منحةَ مسجَّلة لهذا الرقم بعد.</p>';
+  }
+  const trials = list.filter((h) => h && h.plan === 'trial').length;
+  const rows = list.slice(-6).reverse().map((h) =>
+    esc(fmtDateShort(h.at)) + ' · ' + esc(String(h.days || 0)) + ' يومًا · ' +
+    esc(PLAN_LABELS[h.plan] || h.plan || 'بلا وجه') + ' · ' + esc(h.by || 'غير مذكور'));
+  return '<p class="login-sub" style="margin:0 0 10px">سجلُّ المنح: ' +
+    list.length + ' — ' + (trials ? 'منها ' + trials + ' تجريبية' : 'كلُّها مدفوعة') +
+    '<br>' + rows.join('<br>') + '</p>';
+}
+
+/** لوحة التحكّم في رقم: كل ما يملكه المشرف في حسابه، في مكان واحد. */
 function openAccessPanel(phone) {
   const access = providersAccess[String(phone)] || null;
   const p = providersState.find((x) => String(x.phone || '') === String(phone)) || {};
   const endText = access
-    ? (access.endMs === null ? 'بلا تاريخ انتهاء' : fmtDateShort(access.endMs))
+    ? (access.endMs === null ? 'لم يُكتب تاريخ' : fmtDateShort(access.endMs))
     : 'لم يُكتب بعد';
+  const planText = access && PLAN_LABELS[access.plan]
+    ? PLAN_LABELS[access.plan]
+    : 'لم يُحدَّد';
+  const live = accessIsVisible(access);
+  // **والمنعُ سبب لا غموض:** `accessIsVisible` تعدّ المكالمات الموقوفة
+  // مخفيّة، فاللوحة وحدها لا تفرّق بين «انتهت مدّته» و«منعته من الاتصال
+  // ومدّته سارية» — وهذا الفرق هو أول ما يسأل عنه المشرف قبل أي إجراء.
+  const granted =
+    !!access &&
+    !access.frozen &&
+    access.active &&
+    access.endMs !== null &&
+    access.endMs > Date.now();
+  const verdict = live
+    ? '<span class="badge active">ظاهرٌ للزبائن الآن</span>'
+    : granted
+      ? '<span class="badge pending">فترةٌ سارية، ومكالماته موقوفة: لا يظهر</span>'
+      : '<span class="badge offline">لا يظهر للزبائن الآن</span>';
   const btn = (action, label, cls) =>
     '<button class="btn-sm ' + cls + '" onclick="accessAction(\'' + esc(phone) + '\',\'' + action + '\')">' + label + '</button>';
+  // **وللمطالع تُعرض البطاقةُ بلا أزرار:** الحارسُ يمنع التنفيذ، لكن زرًّا
+  // يُرفض عند الضغط عليه يعلّم الرجلَ أن اللوحة معطوبة لا أن درجته كذلك.
+  const actions = canWrite()
+    ? btn('trial', 'منح فترة تجريبية', 'blue') +
+      btn('extend', 'تمديد شهر', 'ok') +
+      (access && access.active
+        ? btn('stop', 'إيقاف الاشتراك', 'no')
+        : btn('start', 'تفعيل الاشتراك', 'ok')) +
+      (access && access.frozen
+        ? btn('unfreeze', 'رفع التجميد', 'ok')
+        : btn('freeze', 'تجميد الحساب', 'no')) +
+      (access && access.callsAllowed === false
+        ? btn('allowCalls', 'السماح بالمكالمات', 'ok')
+        : btn('blockCalls', 'منع المكالمات', 'no')) +
+      btn('note', 'ملاحظة لصاحب التوصيل', 'blue') +
+      (access ? btn('clear', 'سحب المستند', 'no') : '')
+    : '<span class="badge offline">درجتُك للاطّلاع: القرارُ بيد المشرف</span>';
   const body =
     '<div class="rv-body">' +
     '<p class="login-sub" style="margin-top:0">' +
     'الاسم: <strong>' + esc(p.name || 'بلا اسم في جدول أصحاب التوصيل') + '</strong><br>' +
     'الرقم: <strong style="direction:ltr;display:inline-block">' + esc(phone) + '</strong><br>' +
-    'نهاية الدفع: <strong>' + esc(endText) + '</strong>' +
-    (access && access.note ? '<br>ملاحظة الحاليّة: <strong>' + esc(access.note) + '</strong>' : '') +
+    'نهاية الفترة: <strong>' + esc(endText) + '</strong><br>' +
+    'وجه المنحة: <strong>' + esc(planText) + '</strong>' +
+    (access && access.note ? '<br>الملاحظة الحالية: <strong>' + esc(access.note) + '</strong>' : '') +
     '</p>' +
+    '<p style="margin:0 0 10px">' + verdict + '</p>' +
+    grantHistoryLine(access) +
     (access
       ? ''
-      : '<p class="badge pending">لا مستند صلاحيات: يعمل بالسماح، وأيّ زرّ هنا يكتب قرارًا صريحًا.</p>') +
+      : '<p class="badge offline">لا بطاقة له: يبقى مخفيًّا حتى تكتب له فترة — «منح فترة تجريبية» أو «تمديد شهر».</p>') +
     '<div class="row-actions" style="flex-wrap:wrap">' +
-    btn('extend', 'تمديد شهر', 'ok') +
-    (access && access.active
-      ? btn('stop', 'إيقاف الاشتراك', 'no')
-      : btn('start', 'تفعيل الاشتراك', 'ok')) +
-    (access && access.frozen
-      ? btn('unfreeze', 'رفع التجميد', 'ok')
-      : btn('freeze', 'تجميد الحساب', 'no')) +
-    (access && access.callsAllowed === false
-      ? btn('allowCalls', 'السماح بالمكالمات', 'ok')
-      : btn('blockCalls', 'منع المكالمات', 'no')) +
-    btn('note', 'ملاحظة لصاحب التوصيل', 'blue') +
-    (access ? btn('clear', 'سحب المستند', 'no') : '') +
+    actions +
     '</div></div>';
   openModal({
     title: 'تحكّم في صاحب التوصيل',
@@ -3190,6 +3622,34 @@ function accessAction(phone, action) {
     }, { value: access ? access.note : '', confirm: 'حفظ الملاحظة' });
     return;
   }
+  if (action === 'trial') {
+    close();
+    // **والمدة يسألها المشرف لا يقرّها الكود:** التجريبية عنده مدّةٌ
+    // يُكافأ بها من لم يدفع بعد، فلو جُمِّدت في سبعٍ لكانت اللوحة هي التي
+    // قرّرت. والفراغ يعني الافتراضي، والعدد يقبل من 1 إلى 365.
+    askText(
+      'منح فترة تجريبية',
+      'كم يومًا؟ (الافتراضي ' + TRIAL_DEFAULT_DAYS + ')',
+      (text) => {
+        const raw = parseInt(String(text).replace(/[^0-9]/g, ''), 10);
+        const days = !raw ? TRIAL_DEFAULT_DAYS : Math.max(1, Math.min(365, raw));
+        const until = nextSubscriptionEnd(access, days);
+        writeAccess(
+          phone,
+          {
+            subscriptionActive: true,
+            subscriptionEnd: until,
+            plan: 'trial',
+            history: grantHistory(access, days, 'trial'),
+          },
+          'trial'
+        );
+        mirrorProviderSubscription(phone, true, until);
+      },
+      { value: String(TRIAL_DEFAULT_DAYS), confirm: 'منح' }
+    );
+    return;
+  }
   if (action === 'extend') {
     // **واللوحة تُغلق قبل السؤال:** يبقى قرارٌ في شاشةٍ بعد أن نُفِّذ،
     // فيقرأه المشرف حالةً قائمةً لا تاريخاً. والإغلاق أولًا يجعل السؤال
@@ -3199,11 +3659,21 @@ function accessAction(phone, action) {
     askConfirm(
       'تمديد الاشتراك',
       'يُمدّد ' + SUB_MONTH_DAYS + ' يومًا لصاحب التوصيل ' + esc(phone) +
-      '<br>إلى: <strong>' + esc(fmtDateShort(until)) + '</strong>' +
+      '<br>إلى: <strong>' + esc(fmtDateShort(until)) + '</strong><br>' +
+      'ويُسمّى وجهُ المنحة في تطبيقه «اشتراكًا مدفوعًا».' +
       (access && access.frozen ? '<br><br>الحساب مجمّد: المدّة تُكتب لكن التجميد يبقى حتى ترفعه.' : ''),
       () => {
-        writeAccess(phone, { subscriptionActive: true, subscriptionEnd: until }, 'extend');
-        // وجدول `providers` يُحدَّث معه: عمود «تاريخ الانتهاء» في القائمة
+        writeAccess(
+          phone,
+          {
+            subscriptionActive: true,
+            subscriptionEnd: until,
+            plan: 'paid',
+            history: grantHistory(access, SUB_MONTH_DAYS, 'paid'),
+          },
+          'extend'
+        );
+        // والجدول `providers` يُحدَّث معه: عمود «تاريخ الانتهاء» في القائمة
         // يقرأ منه، فبلا هذه الكتابة يرى المشرف قرارين في شاشة واحدة.
         mirrorProviderSubscription(phone, true, until);
       },
@@ -3215,7 +3685,7 @@ function accessAction(phone, action) {
     close();
     askConfirm(
       'سحب مستند الصلاحيات',
-      'يعود الرقم إلى «بلا قرار»: يعمل بالسماح حتى تكتب اللوحة قرارًا جديدًا.',
+      'يعود الرقم إلى «بلا قرار»: <strong>لا يظهر للزبائن</strong> حتى تكتب له اللوحة فترةً من جديد.',
       async () => {
         try {
           await db.collection(ACCESS_COLLECTION).doc(String(phone)).delete();
@@ -3379,7 +3849,7 @@ async function reviewRenewal(id, decision) {
     '<br><br>يُمدَّد ' + SUB_MONTH_DAYS + ' يومًا إلى: <strong>' + esc(fmtDateShort(until)) + '</strong>' +
     (access && access.frozen ? '<br><br>الحساب مجمّد: تُمدَّد المدّة ويبقى التجميد حتى ترفعه.' : ''),
     () => {
-      finishRenewal(id, 'approved', {}, phone, until, '');
+      finishRenewal(id, 'approved', {}, phone, until, '', access);
     },
     { confirm: 'اعتماد' }
   );
@@ -3388,18 +3858,22 @@ async function reviewRenewal(id, decision) {
 /**
  * كتابة القرار: الطلب، ثم الصلاحية، ثم المرآة في `providers`.
  *
- * **والحالة تُكتب في الطلب أولًا:** لو انقطعت الشبكة بعد الطلب وقبل
+ * **والمدّة تُكتب قبل حالة الطلب:** لو انقطعت الشبكة بعد الطلب وقبل
  * الصلاحية لرأى المشرف سطرًا معتمدًا بحسابٍ لم يُمَدَّ، فيعيد الاعتماد.
  * وبالعكس — صلاحيةٌ ممدودة وطلبٌ معلّق — يمدّ الشهر مرّتين. فالأخطر هو
- * الثاني، لذا يُكتب المدّة ثم تُعلَّم الحالة: الاعتماد مرّة واحدة في
+ * الثاني، لذا تُكتب المدّة ثم تُعلَّم الحالة: الاعتماد مرّة واحدة في
  * كلتا الحالتين، والفرق يبقى في يد المشرف لا في يد الشبكة.
  */
-async function finishRenewal(id, status, extraAccess, phone, until, reason) {
+async function finishRenewal(id, status, extraAccess, phone, until, reason, access) {
   try {
     if (status === 'approved') {
       await db.collection(ACCESS_COLLECTION).doc(phone).set({
         subscriptionActive: true,
         subscriptionEnd: until,
+        // الدفعُ المعتمد اشتراكٌ مدفوع الوجه: التجريبية لا تُمنح إلا بزرٍّ
+        // من المشرف، فلا يخلط التطبيقُ بين الكلمتين في شاشة صاحب التوصيل.
+        plan: 'paid',
+        history: grantHistory(access, SUB_MONTH_DAYS, 'paid'),
         ...extraAccess,
         updatedAt: firebase.firestore.FieldValue.serverTimestamp(),
       }, { merge: true });
@@ -3430,52 +3904,144 @@ async function finishRenewal(id, status, extraAccess, phone, until, reason) {
 /**
  * توحيد الصلاحيات: مستند قرارٍ لكل صاحب توصيل ليس له واحد.
  *
- * **ولماذا هو ضروري؟** لأن «بلا قرار» يعني العمل بالسماح، فبقيَ من قُبل
- * قبل هذه اللوحة خارج الحكم مكتوبًا لا مقولًا. وهذا الزرّ ينسخ حالته من
- * `providers` إلى `driver_access` باسمها — فيصير لكلّ رقمٍ قرارٌ يُمحى
- * ويُكتب، وتسقط الذرائع عند أول خلاف على ظهورٍ أو اتصال.
+ * **ولماذا هو ضروري الآن؟** لأن القاعدة انقلبت: «بلا قرار» لم تعد عملًا
+ * بالسماح، بل ظهورًا ممنوعًا. فمن قُبل قبل أن توجد هذه اللوحة سيُظلم كلُّه
+ * في اللائحة ما لم تُنسخ حالته من `providers` إلى `driver_access` باسمها،
+ * فيصير لكلّ رقمٍ قرارٌ يُمحى ويُكتب، وتسقط الذرائع عند أول خلافٍ على
+ * ظهورٍ أو اتصال.
+ *
+ * **والزرّ لا يُبيضّ أحدًا سرًّا:** من نسخه قرارٌ سارٍ ظهر، ومن لا تاريخ
+ * ساريًا له بقي مخفيًّا، واللوحة تقول العددين وتعرض عليه أن يمنح أولئك
+ * فترةً تجريبية بمدةٍ يختارها هو — فالقرار بقي في يده لا في الكود.
  */
 async function backfillAccess() {
   askConfirm(
     'توحيد الصلاحيات',
     'ينشئ مستند صلاحيات لكلّ صاحب توصيل لا مستند له، بنسخ قرار اللوحة الحاليّ: ' +
-    'نشطٌ أو موقوفٌ أو محظورٌ وتاريخُ انتهائه.<br><br>لا يغيّر أحدًا له مستند اليوم.',
+    'نشطٌ أو موقوفٌ أو محظورٌ وتاريخُ انتهائه.<br><br>' +
+    'لا يغيّر أحدًا له مستند اليوم. ومن لا تاريخَ ساريًا له يبقى <strong>مخفيًّا</strong> ' +
+    'عن الزبائن حتى تمنحه فترة — تقترحها اللوحة بعد الكتابة.',
     async () => {
       try {
         const snap = await db.collection('providers').get();
-        const rows = snap.docs.map((d) => ({ id: d.id, ...(d.data() || {}) }));
-        const phones = rows.map((p) => String(p.phone || '').trim()).filter(Boolean);
+        const rows = snap.docs
+          .map((d) => ({ id: d.id, ...(d.data() || {}) }))
+          .filter((p) => String(p.phone || '').trim());
+        const phones = rows.map((p) => String(p.phone).trim());
         const existing = await loadAccess(phones);
-        const batch = db.batch();
-        let created = 0;
+        const now = Date.now();
+        const ops = [];
+        const dark = [];
+        let live = 0;
         rows.forEach((p) => {
           const phone = String(p.phone || '').trim();
-          if (!phone || existing[phone]) return;
-          batch.set(db.collection(ACCESS_COLLECTION).doc(phone), {
-            subscriptionActive: p.subscription_active !== false,
-            subscriptionEnd: p.subscription_end || null,
-            frozen: p.blocked === true,
-            callsAllowed: true,
-            note: '',
-            migrated_from: 'providers',
-            updatedAt: firebase.firestore.FieldValue.serverTimestamp(),
+          if (existing[phone]) return;
+          // ونفسُ الحقيقة التي يراها في عمود «الاشتراك»: الصدقُ لا «ليس
+          // موقوفًا»، فلو اختلف المصدران اختلف الجوابان.
+          const active = Boolean(p.subscription_active);
+          const endMs = millisOf(p.subscription_end);
+          const grant = active && endMs > now && p.blocked !== true;
+          if (grant) live++;
+          else dark.push(phone);
+          ops.push({
+            ref: db.collection(ACCESS_COLLECTION).doc(phone),
+            data: {
+              subscriptionActive: active,
+              subscriptionEnd: p.subscription_end || null,
+              frozen: p.blocked === true,
+              callsAllowed: true,
+              plan: grant ? 'paid' : '',
+              note: '',
+              migrated_from: 'providers',
+              updatedAt: firebase.firestore.FieldValue.serverTimestamp(),
+            },
+            opts: { merge: true },
           });
-          created++;
         });
-        if (!created) {
+        if (!ops.length) {
           toast('كل أصحاب التوصيل لهم قرارٌ مكتوب بالفعل');
           return;
         }
-        await batch.commit();
-        await logActivity('توحيد صلاحيات أصحاب التوصيل', created + ' رقمًا');
-        toast('كُتبت قرارات لـ' + created + ' صاحب توصيل');
+        await commitInChunks(ops);
+        await logActivity('توحيد صلاحيات أصحاب التوصيل', ops.length + ' رقمًا');
+        toast(
+          'كُتبت ' + ops.length + ' قرارات: ' + live + ' سارية، و' +
+          dark.length + ' بلا فترة'
+        );
         loadProviders();
+        if (dark.length) offerTrialTo(dark);
       } catch (err) {
         toast(err.message, true);
       }
     },
     { confirm: 'توحيد' }
   );
+}
+
+/**
+ * كتابةٌ على دفعات: Firestore لا تقبل أكثر من 500 عمليةٍ في الدفعة واحدة،
+ * والدفعة الواحدة هي الضمان أن يرى المشرف إمّا كلَّ القرارات وإلا لا شيء —
+ * فقرارٌ كتب نصفه أخطرُ من قرارٍ لم يُكتب.
+ */
+async function commitInChunks(ops) {
+  for (let i = 0; i < ops.length; i += 400) {
+    const batch = db.batch();
+    ops.slice(i, i + 400).forEach((op) => batch.set(op.ref, op.data, op.opts));
+    await batch.commit();
+  }
+}
+
+/** عرضُ فترة تجريبيةٍ على مجموعةِ أرقامٍ بقيت مخفيّة بعد التوحيد. */
+function offerTrialTo(phones) {
+  askText(
+    'منح فترة تجريبية',
+    'هؤلاء ' + phones.length + ' صاحب توصيل بلا فترةٍ سارية، فلا يظهرون للزبائن. ' +
+    'كم يومًا تُمنح لهم؟ اتركه فارغًا لتُبقيهم مخفيّين حتى تقرّر كلَّ واحدٍ وحده.',
+    (text) => {
+      const raw = parseInt(String(text).replace(/[^0-9]/g, ''), 10);
+      if (!raw) {
+        toast('بقيوا بلا فترة: لا يظهرون حتى تكتب لهم قرارًا');
+        return;
+      }
+      const days = Math.max(1, Math.min(365, raw));
+      const until = new Date(Date.now() + days * 86400000);
+      grantTrialBatch(phones, days, until);
+    },
+    // والفراغ هو الافتراضي هنا لا سبعٌ مكتوبة: ضغطةُ مفتاح واحد على خانةٍ
+    // مليئة تمنح المدة على كل هؤلاء دفعةً واحدة، والمنحة الجماعية قرار
+    // يستحق أن يكتبه المشرف بيده. الفردية يبقى فيها الافتراضي مكتوبًا —
+    // هو اختار الرقم أولًا.
+    { confirm: 'منح للجميع' }
+  );
+}
+
+/** تنفيذ المنحة الجماعية، والمرآة في `providers` كما في كل قرار. */
+async function grantTrialBatch(phones, days, until) {
+  try {
+    // **والسجلُّ يُقرأ قبل أن يُكتب:** الكتابةُ الجماعية بدمجٍ لا تعرف ما
+    // قبلها، فلو كُتب السطرُ وحده لمحو ما قبله من منحٍ ذلك الرقم — وهذا
+    // هو معنى «منحته الثالثة هذا العام».
+    const prev = await loadAccess(phones);
+    await commitInChunks(phones.map((phone) => ({
+      ref: db.collection(ACCESS_COLLECTION).doc(phone),
+      data: {
+        subscriptionActive: true,
+        subscriptionEnd: until,
+        plan: 'trial',
+        history: grantHistory(prev[phone], days, 'trial'),
+        updatedAt: firebase.firestore.FieldValue.serverTimestamp(),
+      },
+      opts: { merge: true },
+    })));
+    await Promise.all(
+      phones.map((phone) => mirrorProviderSubscription(phone, true, until))
+    );
+    await logActivity('منح فترة تجريبية', phones.length + ' رقمًا · ' + days + ' يومًا');
+    toast('مُنحت ' + days + ' يومًا لـ' + phones.length + ' صاحب توصيل');
+    loadProviders();
+  } catch (err) {
+    toast(err.message, true);
+  }
 }
 
 /* ---------- Customers ---------- */
@@ -3744,6 +4310,10 @@ async function loadSubSettings() {
 $('#subsettings-form').addEventListener('submit', async (e) => {
   e.preventDefault();
   const msg = $('#subsettings-msg');
+  // **والسعرُ ورقمُ المال بيد المالك:** المشرفُ يقرّر لمن يظهر ومتى، أمّا
+  // ثمنُ الاشتراكُ ورقمُ الحِساب الذي تذهب إليه الأموال فليس قراراً يومياً
+  // يقبل التعدّل بين رجلين في يومٍ واحد.
+  if (!needRight('owner', 'الإعدادات العامة')) return;
   try {
     const batch = db.batch();
     batch.set(db.collection('settings').doc('subscription_fee'), { value: Number($('#set-fee').value) });
@@ -3765,24 +4335,39 @@ $('#subsettings-form').addEventListener('submit', async (e) => {
 $('#password-form').addEventListener('submit', async (e) => {
   e.preventDefault();
   const msg = $('#pw-msg');
+  const say = (t, bad) => {
+    msg.textContent = t;
+    msg.classList.remove('hidden');
+    msg.style.color = bad ? 'var(--danger)' : 'var(--primary)';
+  };
+  const user = auth.currentUser;
+  if (!user || !user.email) return say('لا جلسةَ دخولٍ محفوظة لإعادة التعيين', true);
+  const current = $('#pw-current').value;
+  const next = $('#pw-next').value;
+  if (next.length < 6) return say('الجديدة قصيرة: ستّة محارف فأكثر', true);
   try {
-    const current = $('#pw-current').value;
-    const next = $('#pw-next').value;
-    const snap = await db.collection('admins').where('username', '==', ADMIN.username).limit(1).get();
-    if (snap.empty || snap.docs[0].data().password !== current) {
-      throw new Error('كلمة المرور الحالية غير صحيحة');
-    }
-    await snap.docs[0].ref.update({ password: next });
-    await logActivity('تغيير كلمة المرور', ADMIN.full_name);
-    msg.textContent = 'تم تغيير كلمة المرور بنجاح';
-    msg.className = 'msg-text';
-    msg.classList.remove('hidden');
-    msg.style.color = 'var(--primary)';
+    // **والتحقّقُ من القديمة هو إعادةُ الدخول لا مقارنةُ ملفّ:** السرّ
+    // تعيش في مكانٍ واحد فقط. وكان البابُ السابق يقارن حقلًا مكتوبًا في
+    // Firestore ثم يكتب حقلًا — فيقرأ المشرفُ «تم تغيير كلمة المرور»
+    // ويدخل بكلمته القديمة: تحكّمٌ كاملُ الوهم، وسرٌّ مكشوفٌ لكل مشرفٍ
+    // يملك قراءة الجدول.
+    const cred = firebase.auth.EmailAuthProvider.credential(user.email, current);
+    await user.reauthenticateWithCredential(cred);
+    await user.updatePassword(next);
+    // ويُطمسُ كلُّ أثرٍ للسابق: حقلُ السرّ القديم لا يُقرأ ولا يُكتب بعد.
+    await db.collection('admins').doc(user.uid).set(
+      { password: firebase.firestore.FieldValue.delete() },
+      { merge: true }
+    );
+    await logActivity('تغيير كلمة المرور', (ADMIN && ADMIN.full_name) || '');
     e.target.reset();
+    say('تم تغيير كلمة المرور: ادخل بها من الآن');
   } catch (err) {
-    msg.textContent = err.message;
-    msg.style.color = 'var(--danger)';
-    msg.classList.remove('hidden');
+    say(err.code === 'auth/requires-recent-login'
+      ? 'مرّ على دخولك وقتٌ طويل: اخرج ثم ادخل ثم أعد المحاولة'
+      : (err.code === 'auth/wrong-password' || err.code === 'auth/invalid-credential' || err.code === 'auth/invalid-login-credentials')
+        ? 'كلمة المرور الحالية غير صحيحة'
+        : 'تعذّر التغيير: ' + err.message, true);
   }
 });
 
@@ -3868,7 +4453,8 @@ document.querySelectorAll('#renewals-seg .seg-btn').forEach((b) =>
   })
 );
 
-/* فلاتر سجل المكالمات: التصفية من الذاكرة، فلا إعادة قراءة للقاعدة. */document.querySelectorAll('#calls-seg .seg-btn').forEach((b) =>
+/* فلاتر سجل المكالمات: التصفية من الذاكرة، فلا إعادة قراءة للقاعدة. */
+document.querySelectorAll('#calls-seg .seg-btn').forEach((b) =>
   b.addEventListener('click', () => {
     document.querySelectorAll('#calls-seg .seg-btn').forEach((x) => x.classList.remove('active'));
     b.classList.add('active');
@@ -3907,6 +4493,9 @@ function startClock() {
  *   وحده. حُذف، وإنشاء الحساب الأول صار عمل المالك.
  */
 async function boot() {
+  // **والحرسُ قبل أي شيء:** الأزرارُ تُرسم بعد الدخول، فلا يفلت فعلٌ
+  // من الدرجات لأنّ لافّةً تأخّرت.
+  guardRights();
   try {
     const user = auth.currentUser || (await new Promise((res) => {
       const un = auth.onAuthStateChanged((u) => { un(); res(u); });
