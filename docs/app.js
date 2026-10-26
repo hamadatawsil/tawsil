@@ -2555,19 +2555,20 @@ async function saveReviewDocs(btn) {
 /* ---------- طلبات تسجيل أصحاب التوصيل ---------- */
 
 /*
- * **هذه القائمة غير قابلة للمراجعة نظرياً:** التطبيق يفرض أربع وثائق
- * قبل الإرسال، والقواعد تفرضها قبل الكتابة، فالطلب الذي يصل هنا مضمون
- * أن له أربع صور. ومَن يشترط الفحص هنا برمجياً يضيف فخّاً لنفسه: يوم
- * تُضاف وثيقة خامسة يبقى الفحص القديم سليماً ويقبل طلباً ناقصاً.
+ * **لا عدد للوثائق مكتوباً في هذا القسم:** العرض والعدّ والفحص كلُّها
+ * من `DRIVER_DOC_IDS`، فليست القائمة هنا هي التي تقرّر كم وثيقةً يلزم،
+ * بل ما يرسله التطبيق. والوثيقة الخامِسة — تأمين الدراجة — زيدت بهذا
+ * الشرط، فزاد عددها في الجدول والمراجعة والفحص معاً بلا سطرٍ آخر.
  */
 
-const DRIVER_DOC_IDS = ['id_card', 'personal_photo', 'grey_card', 'driving_license'];
+const DRIVER_DOC_IDS = ['id_card', 'personal_photo', 'grey_card', 'driving_license', 'bike_insurance'];
 
 const DRIVER_DOC_LABELS = {
   id_card: 'بطاقة التعريف',
   personal_photo: 'الصورة الشخصية',
   grey_card: 'البطاقة الرمادية',
   driving_license: 'رخصة السياقة',
+  bike_insurance: 'تأمين الدراجة',
 };
 
 const DRIVER_STATUS_LABELS = {
@@ -2629,6 +2630,7 @@ async function loadDriverRequests() {
   const snap = await db.collection('driver_applications').get();
   driverWarningsMap = await loadDriverWarnings();
   driverBannedSet = await loadBannedDrivers();
+  driverArchiveMap = await loadDriverArchives();
   // **ملفّات أصحاب التوصيل الشخصية:** الاسم المعدَّل والصورة يأتيان من
   // `driver_profiles`، فيُدمجان بالرقم. ومن لا مستند له (قُبل قبل الميزة)
   // يبقى على اسم الطلب بلا صورة.
@@ -2678,9 +2680,13 @@ function renderDriverRequests() {
       // **الأزرار تظهر للقيد فقط:** طلب مقبول أو مرفوض لا يُراجَع مرّة
       // ثانية من هنا، فإعادة فتحه تعني إقراراً غير مسجّل على منافس
       // محتمل. وما قبله يُحذف صراحةً إن أراد المشرف تغيير رأيه.
+      // **والأرشيفُ يُفتَحُ من كلِّ سطر:** معلَّقًا كانَ الطلبُ أم مقبولًا
+      // أم مرفوضًا، فالورقةُ التي يريدُها المشرفُ بعدَ شهرٍ هي الورقةُ
+      // نفسُها، والنافذةُ واحدةٌ للقائمةِ كلها.
+      actions += '<button class="btn-sm blue" onclick="openDriverArchive(\'' + esc(r.id) + '\')">' +
+        (st === 'pending' ? 'مراجعة الوثائق' : 'الوثائق') + '</button>';
       if (st === 'pending') {
         actions +=
-          '<button class="btn-sm blue" onclick="openDriverReview(\'' + esc(r.id) + '\')">مراجعة الوثائق</button>' +
           '<button class="btn-sm ok" onclick="reviewDriverRequest(\'' + esc(r.id) + '\',\'approve\')">قبول</button>' +
           '<button class="btn-sm no" onclick="reviewDriverRequest(\'' + esc(r.id) + '\',\'reject\')">رفض</button>';
       }
@@ -2710,7 +2716,7 @@ function renderDriverRequests() {
         '<div><strong>' + esc(dispName) + '</strong></div>' +
         '</div></td>' +
         '<td style="direction:ltr;text-align:right">' + esc(r.phone) + '</td>' +
-        '<td><span class="doc-chip">' + DRIVER_DOC_IDS.length + ' وثائق</span></td>' +
+        '<td><span class="doc-chip">' + DRIVER_DOC_IDS.length + ' وثائق</span>' + driverDocSummary(r.id) + '</td>' +
         '<td>' + fmtDate(r.createdAt) + '</td>' +
         '<td>' + badge + warnChip + note + '</td>' +
         '<td>' + actions + '</td>' +
@@ -2752,40 +2758,381 @@ async function fetchDriverDocuments(id) {
   return docs;
 }
 
-function openDriverReview(id) {
+/* ---------- أرشيفُ الوثائقِ الدائم ---------- */
+
+const DAY_MS = 86400000;
+
+/*
+ * **الحالةُ مشتقَّةٌ من التاريخِ لا من ذاكرةِ المشرف:** ورقةٌ «معتمدةٌ» في
+ * بطاقةِ المراجعةِ لا تعني أنَّها ساريةٌ اليوم؛ فالمشرفُ يعتمدُها في يناير
+ * وتنتهي في ديسمبر، والجدولُ الذي لا يحسبُ يقولُ «كلُّ شيءٍ تمام» بينما
+ * التأمينُ ماتَ منذَ أشهر. فالاسمُ الذي يقرؤُهُ هنا محسوبٌ من حالةِ
+ * المراجعةِ وتاريخِ الانتهاءِ ومهلَةِ التنبيه، وهوَ الحسابُ نفسُهُ المكتوبُ
+ * في Dart، فلا تقولُ اللوحةُ «سارية» وتقولُ شاشةُ السائقِ «منتهية».
+ */
+function driverDocState(cell, nowMs) {
+  const now = nowMs || Date.now();
+  if (!cell) return 'missing';
+  if (cell.reviewState === 'rejected') return 'rejected';
+  if (cell.reviewState === 'staged') return 'renewal';
+  if (cell.reviewState !== 'accepted') return 'pending_review';
+  const end = millisOf(cell.expiry);
+  if (!end) return 'no_date';
+  if (end <= now) return 'expired';
+  const days = Number(cell.reminderDays) > 0 ? Number(cell.reminderDays) : 30;
+  if (end - now <= days * DAY_MS) return 'expiring';
+  return 'valid';
+}
+
+const DRIVER_DOC_STATE_LABELS = {
+  missing: 'لا أثر',
+  rejected: 'مرفوضة',
+  renewal: 'تجديدٌ قيد النظر',
+  pending_review: 'بانتظار النظر',
+  no_date: 'معتمدة بلا تاريخ',
+  expired: 'منتهية الصلاحية',
+  expiring: 'تنتهي قريبًا',
+  valid: 'سارية',
+};
+
+/* **ولونُ الشارةِ واحدٌ في الجدولِ والنافذة:** «منتهية» حمراءُ في الاثنين،
+ * فلا يقرؤُ المشرفُ أخضرَ في عمودٍ وأحمرَ في آخر. */
+const DRIVER_DOC_STATE_BADGE = {
+  missing: 'banned',
+  rejected: 'rejected',
+  renewal: 'pending',
+  pending_review: 'pending',
+  no_date: 'approved',
+  expired: 'rejected',
+  expiring: 'pending',
+  valid: 'approved',
+};
+
+/* **التاريخُ يُخزَّنُ طابعًا زمنيًّا ويُعرضُ يومًا:** حقلُ اليومِ لا يعرفُ
+ * الطوابعَ والعكسُ صحيح، فنحوِّلُ هنا لا في المستند. والفارغُ معنىً
+ * حقيقيّ: «لا تاريخَ بعدُ»، فيُكتَبُ فارغًا صراحةً لا غائبًا،
+ * فتعرفُ الورقةُ نفسُها أنَّها بلا تاريخٍ لا أنَّ تاريخَها ضاع. */
+function toDateInput(value) {
+  const ms = millisOf(value);
+  if (!ms) return '';
+  const d = new Date(ms);
+  const pad = (n) => (n < 10 ? '0' + n : '' + n);
+  return d.getFullYear() + '-' + pad(d.getMonth() + 1) + '-' + pad(d.getDate());
+}
+
+function fromDateInput(value) {
+  if (!value) return null;
+  const parsed = new Date(value + 'T00:00:00').getTime();
+  return Number.isFinite(parsed) ? new Date(parsed) : null;
+}
+
+/* **ورؤوسُ الأرشيفِ تُقرَأُ معَ الجدولِ لأنَّها بلا صور:** المستندُ رأسٌ
+ * صغيرٌ من خمسِ خلايا: حالةٌ وتاريخٌ ومهلة، فقرأتُها كلِّها طلبٌ واحدٌ
+ * رخيص. والصورُ لا تُحمَلُ إلّا في النافذةِ عندَ الطلب، وإلّا صارَ فتحُ
+ * اللوحةِ عشرينَ ميغابايتٍ من الوثائقِ قبلَ أن ينقرَ المشرفُ على شيء. */
+async function loadDriverArchives() {
+  try {
+    const snap = await db.collection('driver_documents').get();
+    const map = {};
+    snap.docs.forEach((d) => { map[d.id] = d.data() || {}; });
+    return map;
+  } catch (err) {
+    return {};
+  }
+}
+
+let driverArchiveMap = {};
+
+/** **علامةُ العمودِ محسوبةٌ من التواريخِ لا من الأسماء:** لا تقرأُ صورةً
+ * ولا تُبطِئ الجدولَ، ومن لا أرشيفَ لهُ بلا علامةٍ لا بسطرٍ فارغ. */
+function driverDocSummary(phone) {
+  const arch = driverArchiveMap[phone];
+  if (!arch) return '';
+  const cells = arch.docs || {};
+  const states = DRIVER_DOC_IDS.map((k) => driverDocState(cells[k]));
+  const expired = states.filter((s) => s === 'expired').length;
+  const soon = states.filter((s) => s === 'expiring').length;
+  if (expired) return '<span class="badge rejected">منتهية: ' + expired + '</span>';
+  if (soon) return '<span class="badge pending">تنتهي قريبًا: ' + soon + '</span>';
+  return '';
+}
+
+/**
+ * يفتحُ وثائقَ صاحبِ توصيلٍ واحدٍ بأوجهُها الثلاثة: صورةُ الطلبِ كما
+ * أُرسلتْ، وصورَتُهُ المعتمدةُ في الأرشيفِ مع تاريخِها، وصندوقُ تجديدِه.
+ *
+ * **والنافذةُ من كلِّ سطرٍ لا من المعلَّقِ وحدَه:** القبولُ ليسَ آخرَ مرةٍ
+ * يرى فيها المشرفُ الوثيقة؛ فمن حقِّه أن يرجعَ بعدَ شهرٍ ويتحقَّقَ أنَّ
+ * التأمينَ كانَ ساريًا يومَ أشعلَ صاحبُ التوصيلِ دراجتَه. والطلباتُ
+ * القائمةُ تُحذفُ يومًا، والأرشيفُ يبقى.
+ */
+function openDriverArchive(id) {
   const r = driverReqState.find((x) => x.id === id);
-  const name = r ? esc(r.name) : id;
+  const name = r ? esc(r.name) : esc(id);
   openModal({
-    title: 'مراجعة وثائق: ' + name,
-    body: '<div class="rv-body" id="drv-body"><div class="rv-empty">جارٍ تحميل الوثائق...</div></div>',
-    foot: '<button class="modal-btn ghost" onclick="this.closest(\'.doc-lightbox\').remove()">إغلاق</button>',
+    title: 'وثائق: ' + name,
+    body: '<div class="rv-body" id="arch-body"><div class="rv-empty">جارٍ تحميل الوثائق...</div></div>',
+    foot:
+      '<span class="rv-hint">التاريخُ بيدِك، والتنبيهَ يقرؤُه صاحبُ التوصيلِ في التطبيق</span>' +
+      '<button class="modal-btn ghost" onclick="this.closest(\'.doc-lightbox\').remove()">إغلاق</button>' +
+      '<button class="btn-primary" onclick="saveDriverArchive(\'' + esc(id) + '\', this)">حفظ التواريخ والملاحظات</button>',
   });
-  fetchDriverDocuments(id)
-    .then((docs) => {
-      const host = document.getElementById('drv-body');
-      // **الحارس يمنع الكتابة على عنصر رحل:** الفتح أخذ زمن الشبكة، فقد
-      // يُغلق المشرف النافذة أو يفتح طلباً آخر قبل وصول الصور. والكتابة
-      // على عنصر لم يعد في الصفحة تُنشئ العنصر من جديد في مكان غريب.
-      if (!host) return;
-      host.innerHTML = docs
-        .map((d) => {
-          const img = d.data
-            ? '<img class="rv-img" src="data:image/jpeg;base64,' + esc(d.data) + '" onclick="openDocImage(this.src, \'' + d.label + '\')">'
-            : '<div class="rv-empty">لا صورة</div>';
-          return (
-            '<div class="rv-item">' +
-            '<div class="rv-imgbox">' + img + '</div>' +
-            '<div class="rv-meta"><strong>' + d.label + '</strong></div>' +
-            '</div>'
-          );
-        })
-        .join('');
-    })
-    .catch((err) => {
-      const host = document.getElementById('drv-body');
-      if (!host) return;
-      host.innerHTML = '<div class="rv-empty">تعذّر تحميل الوثائق: ' + esc(err.message) + '</div>';
+  renderDriverArchive(id).catch((err) => {
+    const host = document.getElementById('arch-body');
+    if (host) host.innerHTML = '<div class="rv-empty">تعذّر تحميل الوثائق: ' + esc(err.message) + '</div>';
+  });
+}
+
+/** يقرأُ الأوجهَ الثلاثةَ معًا ويرسمُها: الطلبُ، فالأرشيفُ، فالصندوق. */
+async function renderDriverArchive(id) {
+  const [appDocs, files, staged, head] = await Promise.all([
+    fetchDriverDocuments(id),
+    db.collection('driver_documents').doc(id).collection('files').get(),
+    db.collection('driver_documents').doc(id).collection('staged').get().catch(() => null),
+    db.collection('driver_documents').doc(id).get(),
+  ]);
+  const host = document.getElementById('arch-body');
+  // **الحارسُ قبلَ الكتابة:** النافذةُ قد تُغلَقُ أو يفتحَ غيرُها أثناءَ
+  // الشبكة، فالكتابةُ على عنصرٍ رحلَ تُنشِئُه من جديدٍ في مكانٍ غريب.
+  if (!host) return;
+  const archived = {};
+  files.docs.forEach((d) => { archived[d.id] = d.data() || {}; });
+  const incoming = {};
+  if (staged) staged.docs.forEach((d) => { incoming[d.id] = d.data() || {}; });
+  const cells = (head.data() || {}).docs || {};
+  host.innerHTML = appDocs
+    .map((d) => archiveRow(id, d, cells[d.key], archived[d.key], incoming[d.key]))
+    .join('');
+}
+
+/** خليَّةُ وثيقةٍ واحدةٍ في النافذة: صورتُها وتاريخُها وقرارُها. */
+function archiveRow(id, d, cell, archived, incoming) {
+  const state = driverDocState(cell);
+  const shown = (archived && archived.data) || (incoming && incoming.data) || d.data || '';
+  const img = shown
+    ? '<img class="rv-img" src="data:image/jpeg;base64,' + esc(shown) + '" onclick="openDocImage(this.src, \'' + esc(d.label) + '\')">'
+    : '<div class="rv-empty">لا صورة</div>';
+  const source = (archived && archived.data)
+    ? 'في الأرشيف'
+    : (incoming && incoming.data) ? 'تجديدٌ لم يُنظَرْ فيه' : (d.data ? 'صورة الطلب' : 'لا صورة');
+  const btns = [];
+  if (d.data) {
+    btns.push('<button class="btn-sm blue" onclick="copyApplicationDoc(\'' + esc(id) + '\',\'' + d.key + '\')">' +
+      (archived && archived.data ? 'نسخ صورة الطلب فوق الأرشيف' : 'اعتماد صورة الطلب في الأرشيف') + '</button>');
+  }
+  if (incoming && incoming.data) {
+    btns.push('<button class="btn-sm ok" onclick="acceptStagedDoc(\'' + esc(id) + '\',\'' + d.key + '\')">اعتماد التجديد</button>');
+    btns.push('<button class="btn-sm no" onclick="rejectStagedDoc(\'' + esc(id) + '\',\'' + d.key + '\')">رفض التجديد</button>');
+  }
+  btns.push('<button class="btn-sm" onclick="notifyDriverDoc(\'' + esc(id) + '\',\'' + d.key + '\')">تنبيه بالتجديد</button>');
+  const sel = (v) => (cell && cell.reviewState === v ? ' selected' : '');
+  return (
+    '<div class="rv-item arch-item" data-doc="' + d.key + '">' +
+    '<div class="rv-imgbox">' + img + '</div>' +
+    '<div class="rv-meta">' +
+    '<strong>' + esc(d.label) +
+      ' <span class="badge ' + DRIVER_DOC_STATE_BADGE[state] + '">' + DRIVER_DOC_STATE_LABELS[state] + '</span>' +
+      ' <span class="doc-chip">' + source + '</span></strong>' +
+    '<div class="rv-btns" style="margin-bottom:8px">' +
+      '<select class="modal-input arch-state" style="width:auto">' +
+        '<option value="accepted"' + sel('accepted') + '>معتمدة</option>' +
+        '<option value="rejected"' + sel('rejected') + '>مرفوضة</option>' +
+        '<option value="pending_review"' + sel('pending_review') + '>بانتظار النظر</option>' +
+      '</select>' +
+      '<input type="date" class="modal-input arch-expiry" style="width:auto" value="' + toDateInput(cell && cell.expiry) + '">' +
+      '<input type="number" class="modal-input arch-reminder" style="width:74px" min="1" max="120" title="التنبيه قبل انتهاء المدة بأيام" value="' +
+        (cell && Number(cell.reminderDays) > 0 ? Number(cell.reminderDays) : 30) + '">' +
+    '</div>' +
+    '<input class="modal-input arch-note" maxlength="120" placeholder="ملاحظة المراجعة (لا تظهر لصاحب التوصيل)" value="' +
+      esc((cell && cell.note) || '') + '">' +
+    '<div class="rv-btns" style="margin-top:8px">' + btns.join('') + '</div>' +
+    '</div>' +
+    '</div>'
+  );
+}
+
+/**
+ * يحفظُ بطاقةَ المراجعةِ وورقةَ الهاتفِ معًا في `batch` واحدة.
+ *
+ * **ولماذا مستندان لا مستندٌ واحدٌ بكلِّ الحقول؟** لأنَّ قواعدِ Firestore
+ * تعرفُ المستندَ كلَّه ولا تعرفُ حقلاً فيه: لا تستطيعُ أن تُخفيَ ملاحظةَ
+ * مشرفٍ عن هاتفٍ يسألُ بتلكَ الملاحظةِ نفسِها. فالوجهُ الأولُ كلُّه
+ * للمشرف، والوجهُ الثاني تاريخٌ خالصٌ يقرؤُه صاحبُ الرقم. ولو كتبَ أحدُهما
+ * ونجحَ وفشلَ الآخرُ لانقلبتِ الشاشةُ في يدِ المشرفِ عن الشاشةِ في يدِ
+ * السائق: ساريةٌ هنا ومنتهيةٌ هناك، ورسالةٌ لا معنى لها في التطبيق.
+ */
+async function saveDriverArchive(id, btn) {
+  const modal = btn.closest('.doc-lightbox');
+  if (!modal) return;
+  const docs = {};
+  const publicDocs = {};
+  modal.querySelectorAll('.arch-item').forEach((item) => {
+    const key = item.dataset.doc;
+    const expiry = fromDateInput(item.querySelector('.arch-expiry').value);
+    const reminder = Math.max(1, Math.min(120, Number(item.querySelector('.arch-reminder').value) || 30));
+    docs[key] = {
+      reviewState: item.querySelector('.arch-state').value,
+      expiry: expiry,
+      reminderDays: reminder,
+      verifiedAt: firebase.firestore.FieldValue.serverTimestamp(),
+      reviewedBy: ADMIN.full_name,
+      note: item.querySelector('.arch-note').value.trim(),
+    };
+    // **ومهلةُ التنبيه تُنسَخُ إلى ورقةِ الهاتفِ أيضًا:** بلا هذا الرقمِ
+    // تقولُ شاشةُ السائقِ «ساريةٌ» يومًا كاملًا قبلَ أن تقولَها اللوحة،
+    // لأنَّها لا تعرفُ متى يبدأُ «قريبًا». فالحسابُ واحدٌ في الواجهتين
+    // لأنَّ الاسمَينِ نفسَيهما مكتوبانِ في الورقتين.
+    publicDocs[key] = { expiry: expiry, remind: reminder };
+  });
+  const now = firebase.firestore.FieldValue.serverTimestamp();
+  const batch = db.batch();
+  batch.set(db.collection('driver_documents').doc(id), { phone: id, updatedAt: now, docs: docs }, { merge: true });
+  batch.set(db.collection('driver_documents_public').doc(id), { phone: id, updatedAt: now, docs: publicDocs }, { merge: true });
+  btn.disabled = true;
+  try {
+    await batch.commit();
+    await logActivity('حفظ أرشيف وثائق صاحب توصيل', id);
+    toast('حُفظت التواريخ والملاحظات');
+    driverArchiveMap = await loadDriverArchives();
+    renderDriverRequests();
+  } catch (err) { toast(err.message, true); }
+  btn.disabled = false;
+}
+
+/** ينسخُ صورةَ الطلبِ إلى الأرشيفِ الدائمِ كما هي، بلا إعادةَ ترميز. */
+async function copyApplicationDoc(id, key) {
+  try {
+    const src = await db.collection('driver_applications').doc(id)
+      .collection('documents').doc(key).get();
+    if (!src.exists || !(src.data() || {}).data) {
+      return toast('لا صورةَ لهذا الطلبِ في هذهِ الوثيقة', true);
+    }
+    const d = src.data();
+    await db.collection('driver_documents').doc(id).collection('files').doc(key).set({
+      type: key,
+      mime: d.mime || 'image/jpeg',
+      bytes: Number(d.bytes) > 0 ? Number(d.bytes) : String(d.data).length,
+      data: d.data,
+      uploadedAt: firebase.firestore.FieldValue.serverTimestamp(),
     });
+    await logActivity('نسخ وثيقة إلى الأرشيف', id + ' / ' + DRIVER_DOC_LABELS[key]);
+    toast('نُسخت الصورة إلى الأرشيف');
+    renderDriverArchive(id);
+  } catch (err) { toast(err.message, true); }
+}
+
+/**
+ * يعتمدُ تجديدًا من صندوقِ الهاتف: صورتُه تصيرُ الأرشيف، والصندوقُ يفرغ.
+ *
+ * **والحذفُ بعدَ النسخِ في طلبٍ واحد:** لو بقيَتِ الصورةُ في الصندوقِ بعدَ
+ * اعتمادِها لَكانَ «قيدَ النظرِ» كذبًا، ولرآها المشرفُ مرَّتينِ في كلِّ مرةٍ
+ * يفتحُ فيها النافذة، وقد يعتمدُ القديمةَ بعدَ أن اعتمدَ الجديدة.
+ */
+async function acceptStagedDoc(id, key) {
+  try {
+    const src = await db.collection('driver_documents').doc(id)
+      .collection('staged').doc(key).get();
+    if (!src.exists || !(src.data() || {}).data) {
+      return toast('لا تجديدَ في هذا الصندوق', true);
+    }
+    const d = src.data();
+    const batch = db.batch();
+    batch.set(db.collection('driver_documents').doc(id).collection('files').doc(key), {
+      type: key,
+      mime: d.mime || 'image/jpeg',
+      bytes: Number(d.bytes) > 0 ? Number(d.bytes) : String(d.data).length,
+      data: d.data,
+      uploadedAt: firebase.firestore.FieldValue.serverTimestamp(),
+    });
+    batch.delete(src.ref);
+    await batch.commit();
+    await pushDriverNotice(id, key, 'document_accepted', null);
+    await logActivity('اعتماد تجديد وثيقة', id + ' / ' + DRIVER_DOC_LABELS[key]);
+    toast('اعتمدَ التجديد');
+    renderDriverArchive(id);
+  } catch (err) { toast(err.message, true); }
+}
+
+/**
+ * يرفضُ تجديدًا رفعَهُ الهاتف: يُفرَّغُ الصندوقُ ويُرسَلُ الخبر.
+ *
+ * **ولماذا يُحذفُ ولا يُترَكُ بحالَتِهِ؟** لأنَّ خليةَ الأرشيفِ تصيرُ
+ * «قيدَ النظر» بقيدِ وجودِ الصورةِ في الصندوق، فلا شيءَ في المشروعِ يقولُ
+ * «نُظِرَ فيهِ ورُفِضَ» غيرَ فراغِهِ بعدَ القرار. ولو بقيَتِ الصورةُ لَظنَّ
+ * المشرفُ في فتحِهِ الثاني أنَّ قرارَهُ لم يُمضَ فيعيدُهُ.
+ *
+ * **والحذفُ بيدِ المشرفِ لا بيدِ الهاتفِ في القواعد،** فالهاتفُ لا يملكُ
+ * إثباتًا على عمليةٍ بلا جسدٍ يُقرأُ فيها سرُّهُ.
+ */
+async function rejectStagedDoc(id, key) {
+  askConfirm(
+    'رفض التجديد',
+    'تُحذفُ الصورةُ المرفوعةُ في الصندوقِ ويصلُ صاحبَ التوصيلِ خبرُ الرفضِ، ' +
+      'فيرفعُ غيرَها. الصورةُ المعتمدةُ في الأرشيفِ لا تُمَسّ.',
+    async () => {
+      try {
+        const src = db.collection('driver_documents').doc(id).collection('staged').doc(key);
+        const batch = db.batch();
+        batch.delete(src);
+        await batch.commit();
+        await pushDriverNotice(id, key, 'document_rejected', null);
+        await logActivity('رفض تجديد وثيقة', id + ' / ' + DRIVER_DOC_LABELS[key]);
+        toast('رُفضَ التجديدُ وأُعلِمَ صاحبُ التوصيل');
+        renderDriverArchive(id);
+      } catch (err) { toast(err.message, true); }
+    },
+    { danger: true, confirm: 'رفض التجديد' }
+  );
+}
+
+/**
+ * يرسلُ تنبيهًا إلى التطبيق: لا نصَّ في الرسالة، بل نوعُها وورقتُها
+ * وتاريخُها، والجملةَ العربيةَ يبني التطبيقُ عندَ صاحبِ التوصيل.
+ *
+ * **ولا نصَّ حرَّ من اللوحةِ إلى شاشةٍ يفتحُها صاحبُ الرقم:** لا تعرفُ
+ * القواعدُ أن تقرأَ معنى جملة، فلو تُرِكَ حقلُ نصٍّ لَكانَ رقمُ زبونٍ أو
+ * عنوانُه يصلُ إلى هاتفٍ غيرِ هاتفِه بكتابةٍ من مشرفٍ ظنَّ الرسالةَ
+ * خاصةً به. فالرسالةُ نوعٌ من أربعةٍ معروفة، وكلُّ كلامٍ فيها مشتقٌّ.
+ */
+async function notifyDriverDoc(id, key) {
+  const modal = document.querySelector('.doc-lightbox');
+  const item = modal ? modal.querySelector('.arch-item[data-doc="' + key + '"]') : null;
+  const expiry = item ? fromDateInput(item.querySelector('.arch-expiry').value) : null;
+  try {
+    await pushDriverNotice(id, key, expiry ? 'document_expiry' : 'renewal_needed', expiry);
+    await logActivity('تنبيه بتجديد وثيقة', id + ' / ' + DRIVER_DOC_LABELS[key]);
+    toast('أُرسل التنبيه إلى التطبيق');
+  } catch (err) { toast(err.message, true); }
+}
+
+/**
+ * يكتبُ التنبيهَ في مكانينِ لا واحد: سجلٍّ دائمٍ تحتَ بطاقةِ الأرشيفِ لا
+ * يقرؤُهُ إلّا المشرف، وخليَّةٍ في ورقةِ التواريخِ يقرؤُها صاحبُ الرقم.
+ *
+ * **ولماذا مكانانِ والحكُّ واحد؟** لأنَّ السجلَّ تاريخٌ يُراجَعُ يومَ شكَّ
+ * أحدٌ («متى نُبهِّهُ؟ كم مرة؟») والخليَّةُ حالةٌ حاضرةٌ تُبنى منها جملةٌ على
+ * الشاشة. والأولُ تحتَ يدِ المشرفِ وحدَهُ لأنَّ بابًا مفتوحَ القراءةِ يسرِبُ
+ * مسارَ كلِّ رسالةٍ فيهِ على سؤالِ مجموعةٍ واحد، ومسارُ الرسالةِ رقمُ
+ * صاحبِها.
+ *
+ * **والثاني مكتوبٌ بـ `update` لا `set`:** ورقةُ التواريخِ تحملُ تواريخَ
+ * كلِّ الوثائق، و`set` يستبدلُ الورقةَ كلَّها بمن كتبَ التنبيهَ — أي أنَّهُ
+ * يمسحُ تواريخَ غيرِهِ من الخليةِ التي لم يذكرْها. فمسارُ الحقلِ النقطيِّ
+ * يلمسُ خليةَ هذهِ الوثيقةِ وحدَها.
+ */
+async function pushDriverNotice(id, key, kind, expiresOn) {
+  const now = firebase.firestore.FieldValue.serverTimestamp();
+  const batch = db.batch();
+  batch.set(db.collection('driver_documents').doc(id).collection('inbox').doc(key + '_' + Date.now()), {
+    kind: kind,
+    docType: key,
+    expiresOn: expiresOn || null,
+    sentAt: now,
+  });
+  const patch = { updatedAt: now };
+  patch['notices.' + key] = { kind: kind, sentAt: now };
+  batch.update(db.collection('driver_documents_public').doc(id), patch);
+  await batch.commit();
 }
 
 /**
@@ -2834,7 +3181,9 @@ async function reviewDriverRequest(id, action) {
       'فيدخل التطبيق بعدها مباشرة.<br><br>' +
       '<strong>لن يظهر للزبائن</strong>: القبولُ وحده لا يُعطي ظهوراً. ' +
       'امنحه من «بطاقة القرار» في جدول أصحاب التوصيل فترةً تجريبية بمدةٍ تحددها، ' +
-      'أو انتظر حتى يدفع اشتراكه الشهري. هل تريد القبول؟',
+      'أو انتظر حتى يدفع اشتراكه الشهري.<br><br>' +
+      '<strong>وتُنسخُ الصورُ الخمسُ إلى أرشيفٍ دائم</strong> تراجعه متى شئت بعد القبول، ' +
+      'فتضعُ فيهِ تاريخَ انتهاءِ كلِّ ورقةٍ ومهلَ تنبيهها. هل تريد القبول؟',
     async () => {
       try {
         const ref = db.collection('driver_applications').doc(id);
@@ -2846,6 +3195,23 @@ async function reviewDriverRequest(id, action) {
         // حساباً ببصمة فارغة كان سيعني حساباً يُفتح بكلمة مرور أيّها.
         if (typeof hash !== 'string' || hash.length !== 64) {
           toast('لا توجد كلمة مرور مخزَّنة لهذا الطلب، لا يمكن القبول', true);
+          return;
+        }
+        // **ولا قبولَ قبلَ أن تُقرأَ الصورُ كلُّها:** الأرشيفُ الدائمُ
+        // يُولَدُ من صورِ الطلبِ في هذا الطلبِ نفسِه، فمن بقيَت واحدةٌ من
+        // خمسٍ بلا صورةٍ وُلِدَ أرشيفُ رقمٍ ناقصٌ ولا يملأُ أحدٌ فراغَهُ بعدَ
+        // أن صارَ الحسابُ حيًّا. والعدُّ هنا ليسَ زينةً في الشاشةِ بل شرطٌ
+        // في الكتابة: لا حسابَ ولا أرشيفَ حتى تكتملَ الأوراقُ الخمس.
+        const imgsSnap = await ref.collection('documents').get();
+        const images = {};
+        imgsSnap.docs.forEach((d) => {
+          const v = d.data() || {};
+          if (v.data) images[d.id] = v;
+        });
+        const missing = DRIVER_DOC_IDS.filter((k) => !images[k]);
+        if (missing.length) {
+          toast('لا قبول: تنقص ' + missing.length + ' وثيقة — ' +
+            missing.map((k) => DRIVER_DOC_LABELS[k]).join('، '), true);
           return;
         }
         const now = firebase.firestore.FieldValue.serverTimestamp();
@@ -2878,6 +3244,42 @@ async function reviewDriverRequest(id, action) {
           reviewed_by: ADMIN.full_name,
           reviewed_at: now,
         });
+        // **والأرشيفُ يُولَدُ معَ الحسابِ لا بعدَهُ في طلبٍ ثانٍ:** لو
+        // أُنشِئَ الحسابُ ثمَّ فشِلَت نسخةُ الأرشيفِ لَكانَ عندَ المشرفِ سائقٌ
+        // حيٌّ بلا وثيقةٍ يراجعُها، ولَما وجدَ التطبيقُ ورقةَ تواريخَ يقرؤها
+        // صاحبُها. فالكتاباتُ كلُّها هنا — الحسابُ والفهرسُ والملفُّ والطلبُ
+        // والأرشيفُ والورقةُ العامة — في `batch` واحدة: إمّا أن يكونَ كلُّ
+        // شيءٍ أو لا يكونَ شيء.
+        //
+        // **و`reviewState: 'accepted'` عندَ القبولِ صدقٌ لا افتراض:**
+        // المشرفُ ضغطَ «قبول» على هذا الطلبِ بعينِه بعدَ أن نظرَ في
+        // وثائقِه، فما في الأرشيفِ هوَ ما رآهُ لا ما يُفتَرَضُ أنَّهُ رآهُ.
+        // ويبقى التاريخُ فارغًا حتى يضعَهُ بيدِه في النافذة.
+        const cells = {};
+        const publicCells = {};
+        DRIVER_DOC_IDS.forEach((k) => {
+          cells[k] = {
+            reviewState: 'accepted', expiry: null, reminderDays: 30,
+            verifiedAt: now, reviewedBy: ADMIN.full_name, note: '',
+          };
+          publicCells[k] = { expiry: null, remind: 30 };
+          batch.set(db.collection('driver_documents').doc(id).collection('files').doc(k), {
+            type: k,
+            mime: images[k].mime || 'image/jpeg',
+            bytes: Number(images[k].bytes) > 0 ? Number(images[k].bytes) : String(images[k].data).length,
+            data: images[k].data,
+            uploadedAt: now,
+          });
+        });
+        batch.set(db.collection('driver_documents').doc(id), {
+          phone: id, updatedAt: now, docs: cells,
+        }, { merge: true });
+        // **وجهُ الهاتفِ في الطلبِ نفسِه:** ورقةُ التواريخِ وحدَها، بلا حالةِ
+        // مراجعةٍ ولا ملاحظةٍ ولا اسمِ مراجع، لأنَّ صاحبَ الرقمِ يقرؤُها
+        // بمفتاحِ رقمِه فما يُكتَبُ هنا يقرؤُهُ كلُّ مَن كتبَ الرقمَ في المسار.
+        batch.set(db.collection('driver_documents_public').doc(id), {
+          phone: id, updatedAt: now, docs: publicCells,
+        }, { merge: true });
         await batch.commit();
         await logActivity('قبول تسجيل صاحب توصيل', label);
         toast('تم القبول وأُنشئ الحساب');
@@ -2902,8 +3304,13 @@ function deleteDriverRequest(id) {
   const name = r ? r.name : id;
   askConfirm(
     'حذف طلب التسجيل',
-    'سيُحذف طلب "<strong>' + esc(name) + '</strong>"' +
-      'مع صور وثائقه الأربع نهائياً.<br>لا يمكن التراجع، ولا يستطيع صاحب التوصيل إعادة الطلب بنفس الرقم بعدها.',
+    'سيُحذف طلب "<strong>' + esc(name) + '</strong>" مع صور وثائقه (' +
+      DRIVER_DOC_IDS.length + ') نهائياً.<br>لا يمكن التراجع.<br><br>' +
+      '<strong>ويستطيع صاحب التوصيل بعد هذا الحذف أن يرسل طلباً جديداً بنفس الرقم</strong>: ' +
+      'فالرقمُ المسجَّلُ من قبلُ هو الذي يمنعُ الطلبَ المكرر، والحذفُ يرفعُ ذلك المنع. ' +
+      'لهذا يُحذفُ الطلبُ المرفوضُ حينَ يريدُ صاحبُه أن يعيدَ التقديم.<br><br>' +
+      '<strong>وأرشيفُ الوثائقِ المعتمدُ لا يُمَسّ</strong>: إن كانَ هذا الرقمُ مقبولاً من قبلُ ' +
+      'فصورُه المعتمدةُ وتواريخُها تبقى للمراجعة، لأنَّ الأرشيفَ سجلٌّ لا فرعٌ من الطلب.',
     async () => {
       try {
         // **حذف الرأس لا يحذف صور الوثائق:** Firestore لا يُزيل
@@ -4683,7 +5090,13 @@ async function backfillAccess() {
             ref: db.collection(ACCESS_COLLECTION).doc(phone),
             data: {
               subscriptionActive: active,
-              subscriptionEnd: p.subscription_end || null,
+              // **والنسخةُ تُطبَعُ لا تُستنسَخُ نصًّا:** `providers` قديمٌ
+              // يحفظ Ending تاريخًا نصًّا، وقاعدةُ الحماية تقارن الوقتَ
+              //الخادميَّ بـ`timestamp` لا بسطر. فنكتبُ الرقمَ نفسَهُ الذي
+              // صدَّقتهُ اللوحةُ تاريخًا حقيقيًّا، فلا يختلف «سارٍ» هنا على
+              // «متاح» هناك، ولا يُحرم مشتركٌ من الظهورِ لأن شكلِ تاريخِهِ
+              // مختلف.
+              subscriptionEnd: endMs ? new Date(endMs) : null,
               frozen: p.blocked === true,
               callsAllowed: true,
               plan: grant ? 'paid' : '',
