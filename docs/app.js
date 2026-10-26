@@ -177,12 +177,20 @@ function applyRoleChrome() {
   // الضغط يعلّم الرجلَ أن اللوحة معطوبة، لا أن درجتَه هي كذلك.
   const bulk = document.getElementById('providers-bulk-bar');
   if (bulk) bulk.style.display = canWrite() ? '' : 'none';
+  // **ونفسُ اليدِ تُطبقُ على ما وُسمَ في الصفحة:** الصيانةُ المكتوبةُ في
+  // الصفحةِ تُعرَفُ بدرجتِها من وسْمِها لا من دالَّةٍ تنساها، فمن أضافَ
+  // زرًّا جديدًا يكتفي بأن يقولَ لمن هو.
+  document.querySelectorAll('[data-need]').forEach((b) => {
+    const need = b.dataset && b.dataset.need;
+    const allowed = need === 'owner' ? isOwner() : canWrite();
+    b.style.display = allowed ? '' : 'none';
+  });
 }
 
 /* ---------- إعدادات المكالمات: بروتوكول التطبيق نفسه ---------- */
 const CALL_ADMIN_ID = 'admin';
 const RING_TIMEOUT_MS = 60000;
-const RUN_SHA = 'v20261025-10';
+const RUN_SHA = 'v20261026-3';
 
 /// مستند الإشارة: الاسم نفسه الذي يقرؤه `call_service_inapp.dart` في الجوّال.
 const SIGNAL_COLLECTION = 'call_signal';
@@ -1598,6 +1606,12 @@ async function approveAdminRequest(uid, role) {
   // **والدرجة تُختار عند القبول لا بعده:** «مطالع» من اليوم الأول يعني أن
   // أحداً لا يدخل اللوحة بيده الكاملة ثم يُنزع منه ما لم يعرف أنه سيُنزع.
   const r = roleOf({ role });
+  // **ولا يُقبَلُ ثانٍ على كرسيٍّ واحد:** زرُّ «قبول مالكًا» يظهرُ ما لم يكن،
+  // فإن سبقَ أحدٌ واللوحةُ لا تزالُ ترسمُ الجدولَ القديمَ رفضَ الفعلُ لا
+  // المنظرُ وحدَه.
+  if (r === 'owner' && await findOwnerUid()) {
+    return toast('المالكُ معلَنٌ بالفعل: لا مالكَ ثانٍ للنظام', true);
+  }
   await db.collection('admins').doc(uid).set({
     uid,
     email: d.email || '',
@@ -1622,9 +1636,29 @@ async function declineAdminRequest(uid) {
   loadAdmins();
 }
 
+/**
+ * **المالكُ وجودٌ واحدٌ لا يُمسّ:** بطاقةٌ واحدةٌ في النظامِ درجتُها «مالك»،
+ * وهيَ التي تُعيِّنُ وتَعزلُ وتبدَّلُ الدرجات. إن حُذِفَت أو دُنِّسَت درجتُها
+ * صارتِ اللوحةُ بلا حارسٍ للتعين، وأولُ داخِلٍ يرفعُ نفسَه إلى مكانِها.
+ * **ولذلك يُقرأُ الحكمُ من القاعدةِ وقتَ الفعلِ لا من نصِّ الزرّ:** الأزرارُ
+ * تُرسَمُ من جدولٍ قد يكونُ قديمًا في الشاشة، والرجلُ قد يضغطُ بعدَ أن تغيَّر
+ * ما تحتَ يديه، فالحارسُ في الدالةِ نفسِها لا في المنظرِ وحدَه.
+ */
+async function findOwnerUid() {
+  const snap = await db.collection('admins').where('role', '==', 'owner').limit(2).get();
+  return snap.empty ? '' : snap.docs[0].id;
+}
+
 async function removeAdmin(uid) {
   if (uid === myUid()) return toast('لا يمكنك إزالة نفسك', true);
   const doc = await db.collection('admins').doc(uid).get();
+  // **ولا بطاقةُ مالكٍ تُحذَفُ البتَّة:** الحكمُ على البطاقةِ نفسِها لا على
+  // «المالكِ الوحيد»، فإنَّ جدولًا قديمًا قد يحملُ مالكَينِ من عهدِ ما قبلَ
+  // الدرجات، وكلاهما لا يُمَسّ — فالحذفُ إن أُبيحَ على واحدةٍ منهما أُغلِقَ
+  // بابُ التعيينِ كلُّه ولا يُفتَحُ إلا بيدٍ من خارجِ اللوحة.
+  if (doc.exists && roleOf(doc.data()) === 'owner') {
+    return toast('المالكُ لا يُزال: تُغلَقَ اللوحةُ بلا يدٍ تُعيِّنُ بعدها', true);
+  }
   const who = doc.exists ? (doc.data().full_name || doc.data().email) : uid;
   // **ونافذةُ اللوحة لا نافذةُ المتصفح:** فعلٌ يعزل رجلاً عن العمل لا
   // يُختصر بسطرٍ رماديٍّ في شريط العنوان، فالواحدة تُقرأ وال أخرى تُغلق
@@ -1680,6 +1714,11 @@ async function loadAdmins() {
 
   const roleCell = (a) => {
     const role = roleOf(a);
+    // **المالكُ لا يُبدَّلُ بمنبوذة:** منظرُ الدرجةِ الثابتةِ يقولُ للمالكِ
+    // نفسِه إنَّ يدَه عن ملَكِه مغلولة، ولا يدعُ له قائمةً يخطئُ فيها مرة.
+    if (role === 'owner') {
+      return '<span class="badge active">مالك النظام — لا يُزال ولا تُبدَّل درجتُه</span>';
+    }
     if (!isOwner()) return '<span class="badge inactive">' + ROLE_LABELS[role] + '</span>';
     return '<select class="modal-input" style="width:auto;padding:2px 8px" ' +
       'onchange="setAdminRole(\'' + a.id + '\', this.value)">' +
@@ -1699,7 +1738,8 @@ async function loadAdmins() {
         '<td><div class="row-actions">' +
         (me && !ownerExists ? '<button class="btn-sm ok" onclick="claimOwner()">اجعلني مالكًا</button>' : '') +
         (isOwner() ? '<button class="btn-sm blue" onclick="resetAdminPassword(\'' + a.id + '\')">رابط كلمة المرور</button>' : '') +
-        (isOwner() && !me ? '<button class="btn-sm no" onclick="removeAdmin(\'' + a.id + '\')">إزالة</button>' : '') +
+        (isOwner() && !me && roleOf(a) !== 'owner'
+          ? '<button class="btn-sm no" onclick="removeAdmin(\'' + a.id + '\')">إزالة</button>' : '') +
         '</div></td></tr>';
       }).join('')
     : '<tr class="empty-row"><td colspan="5">لا يوجد مشرفون</td></tr>';
@@ -1711,6 +1751,19 @@ async function loadAdmins() {
  */
 async function setAdminRole(uid, role) {
   const r = roleOf({ role });
+  // **درجتانِ لا تُمسّان:** بطاقةُ المالكِ لا تُنزَلُ عن ملَكِها — لا بيدِه
+  // ولا بيدِ غيرِه، لأنَّ لا يَرفَعُ إلى المالكِ بعدَه أحدٌ فيبقى النظامُ بلا
+  // حارسٍ أبداً — ولا يُنشأُ مالكٌ ثانٍ، فلو ملكَ اثنانِ انقسمَ التعيينُ
+  // بينهما فلم تُعرَفْ أيُّ كلمةٍ تُصدَّق. والقراءةُ من القاعدةِ وقتَ الفعل،
+  // فالمنظرُ قد يكونُ رسُمَ على جدولٍ قديم.
+  const target = await db.collection('admins').doc(uid).get();
+  const ownerCard = target.exists && roleOf(target.data()) === 'owner';
+  if (ownerCard && r !== 'owner') {
+    return toast('درجةُ المالكِ لا تُبدَّل: لا يرفَعُ بعدها إلى المالكِ أحد', true);
+  }
+  if (r === 'owner' && !ownerCard && await findOwnerUid()) {
+    return toast('لا مالكَ ثانٍ للنظام', true);
+  }
   try {
     await db.collection('admins').doc(uid).update({ role: r });
     if (uid === myUid()) {
@@ -1821,7 +1874,11 @@ async function submitNewAdmin(overlay) {
   const name = overlay.querySelector('#ca-name').value.trim();
   const email = overlay.querySelector('#ca-email').value.trim();
   const pass = overlay.querySelector('#ca-pass').value;
-  const role = roleOf({ role: overlay.querySelector('#ca-role').value });
+  // **وبابُ الإنشاءِ لا يُنشئُ ملكاً:** القائمةُ لا تعرضُ غيرَ «مشرفٍ ومطالع»،
+  // ولو جاءَ نصُّ الدرجةِ من خارجِ اللوحةِ بمالكٍ ثانٍ رُدَّ إلى مشرفٍ، لأنَّ
+  // المالكَ واحدٌ ولا يُجعَلُ في النظامِ اثنانِ من بابِ الأسماء.
+  const chosen = roleOf({ role: overlay.querySelector('#ca-role').value });
+  const role = chosen === 'owner' ? 'admin' : chosen;
   const btn = overlay.querySelector('[data-submit]');
   if (!name || !email || !pass) return toast('الاسمُ والبريدُ والكلمةُ ثلاثةٌ مطلوبة', true);
   if (pass.length < 6) return toast('كلمة السرّ: ستّةُ محارف فأكثر', true);
@@ -2776,7 +2833,7 @@ async function reviewDriverRequest(id, action) {
     'سيُنشأ حساب لصاحب التوصيل "<strong>' + esc(label) + '</strong>" بكلمة المرور التي اختارها، ' +
       'فيدخل التطبيق بعدها مباشرة.<br><br>' +
       '<strong>لن يظهر للزبائن</strong>: القبولُ وحده لا يُعطي ظهوراً. ' +
-      'امنحه من «لوحة التحكّم» في جدول أصحاب التوصيل فترةً تجريبية بمدةٍ تحددها، ' +
+      'امنحه من «بطاقة القرار» في جدول أصحاب التوصيل فترةً تجريبية بمدةٍ تحددها، ' +
       'أو انتظر حتى يدفع اشتراكه الشهري. هل تريد القبول؟',
     async () => {
       try {
@@ -3459,11 +3516,15 @@ function renderProviders() {
       '<td>' + accessEndCell(providersAccess[String(p.phone)]) + '</td>' +
       '<td>' + accessCell(providersAccess[String(p.phone || '')]) + '</td>' +
       '<td><div class="row-actions">' +
-      '<button class="btn-sm blue" onclick="openAccessPanel(\'' + esc(p.phone) + '\')">لوحة التحكّم</button>' +
-      '<button class="btn-sm blue" onclick="editProvider(\'' + p.id + '\')">تعديل</button>' +
+      // **وبابٌ واحدٌ للقرار:** كان الصفُّ يعرضُ «لوحةُ التحكّم» وزرَّ تجميدٍ
+      // سريعٍ معًا، فيظنُّ الرجلُ أنهما يدانِ مختلفتانِ لرجلٍ واحد. البطاقةُ
+      // فيها كلُّ قرارٍ، والصفُّ لا يبقى فيه إلا ما ليس قرارًا: الاسمُ والرقم.
+      (p.phone
+        ? '<button class="btn-sm blue" onclick="openAccessPanel(\'' + esc(p.phone) + '\')" title="مدّته وسجلّ ما مُنح له وكلّ قراراته في شاشة واحدة">بطاقة القرار</button>'
+        : '<span class="badge inactive">بلا رقم</span>') +
       (canWrite()
-        ? quickAccessButtons(String(p.phone || ''), providersAccess[String(p.phone || '')]) +
-          '<button class="btn-sm no" onclick="deleteProvider(\'' + p.id + '\')">حذف</button>'
+        ? '<button class="btn-sm blue" onclick="editProvider(\'' + p.id + '\')">تعديل</button>' +
+          '<button class="btn-sm no" onclick="deleteProvider(\'' + p.id + '\')" title="يمسح سطر اللوحة وبطاقة قراره؛ حسابه في التطبيق لا يُمسّ">حذف</button>'
         : '') +
       '</div></td>' +
       '</tr>'
@@ -3537,11 +3598,72 @@ function syncPickAllBox() {
 
 function updatePickCount() {
   const el = document.getElementById('providers-pick-count');
-  if (!el) return;
-  el.className = 'badge ' + (providersSelection.size ? 'pending' : 'inactive');
-  el.textContent = providersSelection.size
-    ? providersSelection.size + ' محدد'
-    : 'لا أحد محدد';
+  if (el) {
+    el.className = 'badge ' + (providersSelection.size ? 'pending' : 'inactive');
+    el.textContent = providersSelection.size
+      ? providersSelection.size + ' محدد'
+      : 'لا أحد محدد';
+  }
+  syncBulkBar();
+}
+
+/**
+ * تنظيمُ أزرارِ الجماعة: ما لا يُغني مَن اخترتَه لا يُعرَضُ أمامَك.
+ *
+ * **كانت عشرةُ أزرارٍ في صفٍّ واحد:** «تجميدُ حساباتهم» بجانبِ «رفعِ
+ * التجميد» و«منعُ مكالماتهم» بجانبِ «السماحِ بمكالماتهم»، فيقفُ المشرفُ
+ * يسألُ أيَّهما يُطبَّقُ على مَن حدّد — والزوجانِ ليسا احتمالينِ بل حالَتينِ
+ * تُعرَفانِ من البطاقاتِ نفسها. فالآنَ يُعرَضُ الضدُّ الذي يعني شيئًا: إن
+ * كان كلُّ المحدَّدين مجمَّدين بقيَ «رفعُ التجميد» وحدَه.
+ *
+ * **وبلا تحديدٍ تُطفأُ أزرارُ القرارِ كلُّها:** يبقى سطرُ التحديدِ وحده
+ * معَ جُملَةٍ تقولُ ماذا يفعل، لأنَّ زرًّا يكتبُ في بطاقاتٍ بلا أسماءَ يعلّمُ
+ * الرجلَ أنَّ اللوحةَ معطوبةٌ لا أنَّ يدَه هي كذلك.
+ *
+ * **والحالُ تُقرأُ من البطاقاتِ المحفوظةِ لا من الصفحة:** الفحصُ يعرفُ ما
+ * في اللوحةِ من مصدرِ القرارِ نفسِه، فلا يختلفُ ما يراهُ الزرُّ عمّا تكتبُه.
+ */
+function syncBulkBar() {
+  const phones = Array.from(providersSelection).filter(Boolean);
+  const cards = phones.map((phone) => providersAccess[String(phone)] || null);
+  const show = (id, visible) => {
+    const b = document.getElementById(id);
+    if (b) b.style.display = visible ? '' : 'none';
+  };
+  const has = (test) => cards.some(test);
+  const selected = phones.length > 0;
+  const frozen = has((a) => !!a && a.frozen === true);
+  const thawed = has((a) => !a || a.frozen !== true);
+  const running = has((a) => !!a && a.active === true);
+  const silent = has((a) => !!a && a.callsAllowed === false);
+  const callable = has((a) => !a || a.callsAllowed !== false);
+
+  show('bg-plan', selected);
+  show('bg-freeze', selected);
+  show('bg-calls', selected);
+  show('bg-remove', selected);
+  show('bp-stop', selected && running);
+  show('bp-freeze', selected && thawed);
+  show('bp-unfreeze', selected && frozen);
+  show('bp-block', selected && callable);
+  show('bp-allow', selected && silent);
+
+  const hint = document.getElementById('providers-bulk-hint');
+  if (!hint) return;
+  if (!selected) {
+    hint.textContent =
+      'لا قرارَ كُتبَ بعدُ: املأْ مربّعاتِ مَن تريدُ من صُفوفِ الجدول، أو اضغطْ «اختر كل من لا يظهر»، أو حدِّدِ الكلَّ من مربّعِ رأسِ الجدول — فتظهرَ هنا أزرارُ القرار، ولا يُعرَضُ منها إلا ما يُغني مَن اخترتَه.';
+    return;
+  }
+  const bits = [];
+  const counted = (n, label) => { if (n) bits.push(n + ' ' + label); };
+  counted(cards.filter((a) => accessIsVisible(a)).length, 'يظهرون للزبائن');
+  counted(cards.filter((a) => !a).length, 'بلا بطاقة قرار');
+  counted(cards.filter((a) => !!a && a.frozen === true).length, 'مجمّدون');
+  counted(cards.filter((a) => !!a && a.active && a.endMs > Date.now()).length, 'مدّتهم سارية');
+  counted(cards.filter((a) => !!a && a.callsAllowed === false).length, 'مكالماتهم ممنوعة');
+  hint.textContent =
+    'القرارُ هنا يُكتبُ لـ' + phones.length + ' رقمًا دفعةً واحدة: ' + (bits.join(' · ') || 'لا شيء منهم ظاهرًا الآن');
 }
 
 function requireSelection() {
@@ -3888,25 +4010,16 @@ function accessEndCell(access) {
   return '<span class="badge ' + (late ? 'rejected' : 'active') + '">' + esc(fmtDateShort(access.endMs)) + '</span>';
 }
 
-/**
- * زرّانِ سريعان في الصفّ، وكلاهما يكتب في بطاقة القرار.
- *
- * **وهنا أُزيلت ثلاثةُ مقابضَ كانت تُسمّى تحكّماً:** «تفعيل الاتصال» و
+/* ---------- صلاحيات أصحاب التوصيل: قرار اللوحة لا نقرَة الهاتف ---------- */
+
+/*
+ * **ولا زرَّ سريعًا في الصفِّ ولا مقابضَ توهم:** «تفعيل الاتصال» و
  * «تفعيل الاشتراك» و«حظر» كانت تقلب حقولًا في جدول `providers` لا يقرأه
  * التطبيقُ إطلاقًا — لا ظهورَ يتغيّر، ولا اتصالَ يُقطع، ولا حظرَ يسري.
  * أخطرُ من العدم أن توهمَ بالوجود: يضغط المشرفُ «حظر» فيظنّ أنه أوقف
  * رجلاً وهو أمام الزبائن يعمل، ثم لا يعود يشكّ في اللوحة طَوالَ يومِه.
- * فبقيت الأزرارُ التي تُنفّذ، وسُحب ما يوهم.
+ * فالصفُّ بابٌ واحدٌ إلى البطاقة، والبطاقةُ هي التي تُنفِّذ.
  */
-function quickAccessButtons(phone, access) {
-  const b = (action, label, cls) =>
-    '<button class="btn-sm ' + cls + '" onclick="accessAction(\'' + esc(phone) + '\',\'' + action + '\')">' + label + '</button>';
-  if (!phone) return '';
-  if (access && access.frozen) return b('unfreeze', 'رفع التجميد', 'ok');
-  return b('freeze', 'تجميد الحساب', 'no');
-}
-
-/* ---------- صلاحيات أصحاب التوصيل: قرار اللوحة لا نقرَة الهاتف ---------- */
 
 /*
  * **`driver_access` بمفتاح الرقم، لا `providers` بمعرّفها:** التطبيق
@@ -3956,7 +4069,7 @@ const ACCESS_ACTION_LABELS = {
   blockCalls: 'منع المكالمات',
   allowCalls: 'السماح بالمكالمات',
   note: 'ملاحظة لصاحب التوصيل',
-  clear: 'سحب مستند الصلاحيات',
+  clear: 'سحب بطاقة القرار',
 };
 
 /** حالة صاحب التوصيل كما قررتها اللوحة، أو `null` إن لم يُكتب بعد. */
@@ -4145,7 +4258,7 @@ function grantHistoryLine(access) {
     '<br>' + rows.join('<br>') + '</p>';
 }
 
-/** لوحة التحكّم في رقم: كل ما يملكه المشرف في حسابه، في مكان واحد. */
+/** بطاقةُ القرار في رقم: كل ما يملكه المشرف في حسابه، في مكان واحد. */
 function openAccessPanel(phone) {
   const access = providersAccess[String(phone)] || null;
   const p = providersState.find((x) => String(x.phone || '') === String(phone)) || {};
@@ -4174,20 +4287,30 @@ function openAccessPanel(phone) {
     '<button class="btn-sm ' + cls + '" onclick="accessAction(\'' + esc(phone) + '\',\'' + action + '\')">' + label + '</button>';
   // **وللمطالع تُعرض البطاقةُ بلا أزرار:** الحارسُ يمنع التنفيذ، لكن زرًّا
   // يُرفض عند الضغط عليه يعلّم الرجلَ أن اللوحة معطوبة لا أن درجته كذلك.
+  // **والأزرارُ مجموعاتٌ لا صفاً واحداً:** ثلاثتُها تُخفي، وكلُّ واحدةٍ تُخفي
+  // لسببٍ مختلف — فالعنوانُ يقولُ أيَّ بابٍ تفتح، ولا يبقى أن يسألَ المشرفُ
+  // «ما الفرقُ بين تجميدٍ ومنعِ مكالماتٍ وإيقافِ اشتراك».
+  const group = (heading, inner) =>
+    '<div class="apx-group"><span class="apx-gt">' + heading + '</span>' +
+    '<div class="row-actions" style="flex-wrap:wrap">' + inner + '</div></div>';
   const actions = canWrite()
-    ? btn('trial', 'منح فترة تجريبية', 'blue') +
-      btn('extend', 'تمديد شهر', 'ok') +
-      (access && access.active
-        ? btn('stop', 'إيقاف الاشتراك', 'no')
-        : btn('start', 'تفعيل الاشتراك', 'ok')) +
-      (access && access.frozen
-        ? btn('unfreeze', 'رفع التجميد', 'ok')
-        : btn('freeze', 'تجميد الحساب', 'no')) +
-      (access && access.callsAllowed === false
-        ? btn('allowCalls', 'السماح بالمكالمات', 'ok')
-        : btn('blockCalls', 'منع المكالمات', 'no')) +
-      btn('note', 'ملاحظة لصاحب التوصيل', 'blue') +
-      (access ? btn('clear', 'سحب المستند', 'no') : '')
+    ? group('مدَّةُ الظهور',
+        btn('trial', 'منح فترة تجريبية', 'blue') +
+        btn('extend', 'تمديد شهر', 'ok') +
+        (access && access.active
+          ? btn('stop', 'إيقاف الاشتراك', 'no')
+          : btn('start', 'تفعيل الاشتراك', 'ok'))) +
+      group('تجميدٌ لا تنفعُ معه مدَّة',
+        access && access.frozen
+          ? btn('unfreeze', 'رفع التجميد', 'ok')
+          : btn('freeze', 'تجميد الحساب', 'no')) +
+      group('المكالماتُ داخل التطبيق',
+        access && access.callsAllowed === false
+          ? btn('allowCalls', 'السماح بالمكالمات', 'ok')
+          : btn('blockCalls', 'منع المكالمات', 'no')) +
+      group('غيرُ ذلك',
+        btn('note', 'ملاحظة تظهر في تطبيقه', 'blue') +
+        (access ? btn('clear', 'سحب بطاقة القرار', 'no') : ''))
     : '<span class="badge offline">درجتُك للاطّلاع: القرارُ بيد المشرف</span>';
   const body =
     '<div class="rv-body">' +
@@ -4199,15 +4322,14 @@ function openAccessPanel(phone) {
     (access && access.note ? '<br>الملاحظة الحالية: <strong>' + esc(access.note) + '</strong>' : '') +
     '</p>' +
     '<p style="margin:0 0 10px">' + verdict + '</p>' +
+    '<p class="apx-lead">هذه البطاقةُ هي القرارُ الذي يقرأُه هاتفُه: ما تكتبُه هنا يسري ظهورًا ومنعًا من فورِه، ولا يُغني عنهُ شيءٌ في جدولِ اللوحة.</p>' +
     grantHistoryLine(access) +
     (access
       ? ''
       : '<p class="badge offline">لا بطاقة له: يبقى مخفيًّا حتى تكتب له فترة — «منح فترة تجريبية» أو «تمديد شهر».</p>') +
-    '<div class="row-actions" style="flex-wrap:wrap">' +
-    actions +
-    '</div></div>';
+    actions + '</div>';
   openModal({
-    title: 'تحكّم في صاحب التوصيل',
+    title: 'بطاقة قرار صاحب التوصيل',
     body,
     foot: '<button class="modal-btn ghost" onclick="this.closest(\'.doc-lightbox\').remove()">إغلاق</button>',
   });
@@ -4289,13 +4411,13 @@ function accessAction(phone, action) {
   if (action === 'clear') {
     close();
     askConfirm(
-      'سحب مستند الصلاحيات',
+      'سحب بطاقة القرار',
       'يعود الرقم إلى «بلا قرار»: <strong>لا يظهر للزبائن</strong> حتى تكتب له اللوحة فترةً من جديد.',
       async () => {
         try {
           await db.collection(ACCESS_COLLECTION).doc(String(phone)).delete();
           await logActivity(ACCESS_ACTION_LABELS.clear, String(phone));
-          toast('سُحب المستند');
+          toast('سُحبت البطاقة: لا يظهر للزبائن');
           loadProviders();
         } catch (err) { toast(err.message, true); }
       },
@@ -4396,7 +4518,7 @@ function renderRenewals() {
           '<button class="btn-sm ok" onclick="reviewRenewal(\'' + esc(r.id) + '\',\'approve\')">اعتماد وتمديد شهر</button>' +
           '<button class="btn-sm no" onclick="reviewRenewal(\'' + esc(r.id) + '\',\'reject\')">رفض</button>';
       }
-      actions += '<button class="btn-sm blue" onclick="openAccessPanel(\'' + esc(phone) + '\')">لوحة التحكّم</button>';
+      actions += '<button class="btn-sm blue" onclick="openAccessPanel(\'' + esc(phone) + '\')">بطاقة القرار</button>';
       actions += '</div>';
       return (
         '<tr>' +

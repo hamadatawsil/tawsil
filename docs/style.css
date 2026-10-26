@@ -851,5 +851,27 @@ tbody tr:hover { background: #fafcfa; }
 .prov-pick,
 #providers-pick-all { width: 16px; height: 16px; margin: 0; accent-color: var(--primary); cursor: pointer; }
 .pick-cell { width: 34px; text-align: center; }
-.prov-bulk { margin-top: -2px; gap: 8px; }
+.prov-bulk {
+  display: block;
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 10px 12px;
+  margin: -4px 0 14px;
+}
+.bulk-hint { font-size: 12px; color: var(--gray); margin: 6px 0 2px; max-width: 78ch; }
+.bulk-note { font-size: 12px; color: var(--gray); margin: 8px 0 0; border-top: 1px dashed var(--line); padding-top: 8px; max-width: 88ch; }
+.bulk-group { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-top: 8px; }
+.bulk-gt { font-size: 12px; font-weight: 700; color: var(--primary-dark); min-width: 168px; }
+
+/* أدواتُ الصيانة: مكتفيةٌ بذيلٍ واحد حتى لا تزاحمَ أزرارَ كلِّ يوم */
+.maint { background: var(--card); border: 1px solid var(--line); border-radius: var(--radius); padding: 8px 12px; margin: -4px 0 12px; }
+.maint summary { font-size: 13px; font-weight: 700; color: var(--primary-dark); cursor: pointer; }
+.maint-row { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; border-top: 1px dashed var(--line); margin-top: 8px; padding-top: 8px; }
+.maint-text { font-size: 12px; color: var(--gray); margin: 0; flex: 1 1 420px; max-width: 92ch; }
+
+/* بطاقةُ القرارِ لرجلٍ واحد: أزرارُها مجموعاتٌ لا صفٌّ واحد */
+.apx-lead { font-size: 12px; color: var(--gray); margin: 0 0 10px; max-width: 84ch; }
+.apx-group { border-top: 1px dashed var(--line); margin-top: 8px; padding-top: 8px; }
+.apx-gt { display: block; font-size: 12px; font-weight: 700; color: var(--primary-dark); margin-bottom: 6px; }
 .act-del { margin: 0 8px; }

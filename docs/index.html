@@ -7,7 +7,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=Tajawal:wght@400;500;700;800;900&display=swap" rel="stylesheet" />
-  <link rel="stylesheet" href="style.css?v=20261025j" />
+  <link rel="stylesheet" href="style.css?v=20261026c" />
   <script src="https://www.gstatic.com/firebasejs/10.14.1/firebase-app-compat.js"></script>
   <script src="https://www.gstatic.com/firebasejs/10.14.1/firebase-auth-compat.js"></script>
   <script src="https://www.gstatic.com/firebasejs/10.14.1/firebase-firestore-compat.js"></script>
@@ -274,29 +274,57 @@
           <h3 class="section-title">أصحاب التوصيل</h3>
           <span id="providers-access-note" class="badge offline"></span>
           <input id="providers-search" class="search-input" type="text" placeholder="بحث بالاسم أو الرقم أو اللوحة..." />
-          <button class="btn-ghost ok" onclick="addProvider()">إضافة صاحب توصيل</button>
-          <button class="btn-ghost ok" onclick="backfillAccess()">توحيد الصلاحيات</button>
-          <button class="btn-ghost no" onclick="eraseProviderPasswords()">طمس كلمات السرّ المخزّنة</button>
+          <button class="btn-ghost ok" data-need="write" onclick="addProvider()" title="سطرٌ في جدول اللوحة وحده: لا يفتح لصاحبه حساب دخول، ولا يمنحه ظهورًا عند الزبائن">إضافة صاحب توصيل</button>
           <button class="btn-ghost" data-reload="providers">تحديث</button>
         </div>
+
+        <details class="maint" data-need="write">
+          <summary>أعمالُ صيانة: أمرانِ لا يحتاجهما كلَّ يوم</summary>
+          <div class="maint-row">
+            <p class="maint-text"><strong>توحيدُ الصلاحيات</strong> — لكلِّ رقمٍ في الجدول لا بطاقةَ قرارٍ له بعد: ينسخُ حالَتَه القديمة ويكتبُها قرارًا واضحًا. اضغطْه مرَّةً واحدة، وإلا بقيَ كلُّ من لا بطاقةَ له مخفيًّا عن الزبائن ولو كان مشتركًا.</p>
+            <button class="btn-ghost ok" onclick="backfillAccess()">توحيد الصلاحيات</button>
+          </div>
+          <div class="maint-row">
+            <p class="maint-text"><strong>طمسُ كلماتِ السرِّ المخزَّنة</strong> — المستنداتُ القديمةُ تُبقي كلمةَ سرِّ صاحبِ التوصيل نصًّا داخلَ جدولِ اللوحة. هذا يمسحُها من الجدولِ وحدَه: لا يُغيِّرُ اسمًا ولا رقمًا ولا مدَّةً، ولا يقطعُ عن أحدٍ طريقَ الدخولِ إلى تطبيقِه.</p>
+            <button class="btn-ghost no" data-need="owner" onclick="eraseProviderPasswords()">طمس كلمات السرّ المخزّنة</button>
+          </div>
+        </details>
+
         <div class="filter-bar prov-bulk" id="providers-bulk-bar">
           <span id="providers-pick-count" class="badge inactive">لا أحد محدد</span>
-          <button class="btn-ghost" onclick="pickInvisibleProviders()">اختر كل من لا يظهر</button>
-          <button class="btn-ghost" onclick="clearProviderPicks()">إلغاء التحديد</button>
-          <button class="btn-ghost ok" onclick="grantTrialSelected()">تجريبية للمحدَّدين</button>
-          <button class="btn-ghost ok" onclick="grantPaidSelected()">اشتراك مدفوع للمحدَّدين</button>
-          <button class="btn-ghost no" onclick="stopSubscriptionSelected()">إيقاف اشتراكهم</button>
-          <button class="btn-ghost no" onclick="freezeSelected()">تجميد حساباتهم</button>
-          <button class="btn-ghost ok" onclick="unfreezeSelected()">رفع التجميد</button>
-          <button class="btn-ghost no" onclick="blockCallsSelected()">منع مكالماتهم</button>
-          <button class="btn-ghost ok" onclick="allowCallsSelected()">السماح بمكالماتهم</button>
-          <button class="btn-ghost danger" onclick="deleteSelectedProviders()">حذف المحدَّدين</button>
+          <p id="providers-bulk-hint" class="bulk-hint"></p>
+          <div class="bulk-group" id="bg-pick">
+            <span class="bulk-gt">مَن أُحدِّد؟</span>
+            <button class="btn-ghost" onclick="pickInvisibleProviders()" title="يملأُ المربَّعاتِ عمن لا يرون عندَ الزبائنِ الآن">اختر كل من لا يظهر</button>
+            <button class="btn-ghost" onclick="clearProviderPicks()" title="يُفرِّغُ التحديدَ ولا يُغيِّرُ قرارَ أحد">إلغاء التحديد</button>
+          </div>
+          <div class="bulk-group" id="bg-plan">
+            <span class="bulk-gt">مدَّةُ الظهور</span>
+            <button class="btn-ghost ok" id="bp-trial" onclick="grantTrialSelected()" title="مدَّةٌ قصيرةٌ لمن لم يدفع بعد: تسألُك كم يومًا، وتُضافُ إلى ما بقيَ له">تجريبية للمحدَّدين</button>
+            <button class="btn-ghost ok" id="bp-paid" onclick="grantPaidSelected()" title="تمديدٌ لمن دفع: يُحسبُ من آخرِ نهايةٍ ساريةٍ لا من اليوم">اشتراك مدفوع للمحدَّدين</button>
+            <button class="btn-ghost no" id="bp-stop" onclick="stopSubscriptionSelected()" title="يُطفئُ مفتاحَ الاشتراك: تواريخُهم تبقى ولا ظهورَ لهم حتى تُعيدَ التفعيلَ أو تمنحَهم مدَّة">إيقاف اشتراكهم</button>
+          </div>
+          <div class="bulk-group" id="bg-freeze">
+            <span class="bulk-gt">تجميدٌ لا تنفعُ معه مدَّة</span>
+            <button class="btn-ghost no" id="bp-freeze" onclick="freezeSelected()" title="لا يظهرُ للزبائن ولو كانَ له شهرٌ سارٍ؛ والمددُ المكتوبةُ لا تُمسحُ بالتجميد">تجميد حساباتهم</button>
+            <button class="btn-ghost ok" id="bp-unfreeze" onclick="unfreezeSelected()" title="يعيدُهم إلى ما تقرِّرُه مددُهم">رفع التجميد</button>
+          </div>
+          <div class="bulk-group" id="bg-calls">
+            <span class="bulk-gt">المكالماتُ داخلَ التطبيق</span>
+            <button class="btn-ghost no" id="bp-block" onclick="blockCallsSelected()" title="لا يظهرُ أحدٌ منهم في قائمةِ القريبين ولو كانت مدَّتُه سارية">منع مكالماتهم</button>
+            <button class="btn-ghost ok" id="bp-allow" onclick="allowCallsSelected()" title="يعيدُهم إلى قائمةِ القريبين">السماح بمكالماتهم</button>
+          </div>
+          <div class="bulk-group" id="bg-remove">
+            <span class="bulk-gt">إخراجٌ من جدولِ اللوحة</span>
+            <button class="btn-ghost danger" id="bp-del" onclick="deleteSelectedProviders()" title="يمسحُ سطرَ اللوحةِ وبطاقةَ قرارِه؛ وأمَّا حسابُه في التطبيقِ فيبقى يستطيعُ الدخولَ واستقبالَ المكالمات">حذف المحدَّدين</button>
+          </div>
+          <p class="bulk-note">هذه الأزرارَ هي قراراتُ «بطاقةِ القرارِ» نفسُها، لكنَّها تُكتبُ للمحدَّدين دفعةً واحدة. ولِرجلٍ وحدَه افتحْ بطاقتَه من صفِّه: هناك مدَّتُه وسجلُّ ما مُنحَ له.</p>
         </div>
         <div class="table-card">
           <table>
             <thead>
               <tr>
-                <th style="width:36px"><input type="checkbox" id="providers-pick-all" onchange="pickAllProviders(this)" title="تحديد كل المعروض"></th>
+                <th style="width:36px"><input type="checkbox" id="providers-pick-all" onchange="pickAllProviders(this)" title="تحديد كل المعروض في الجدول"></th>
                 <th>#</th><th>الاسم</th><th>الهاتف</th><th>ظهوره للزبائن</th><th>إحداثيات سُلّمت</th><th>اللوحة</th><th>التقييم</th>
                 <th>نهاية الفترة</th><th>قرار اللوحة</th><th>إجراءات</th>
               </tr>
@@ -328,6 +356,7 @@
           <button class="btn-ghost ok" onclick="addArea()">إضافة منطقة</button>
           <button class="btn-ghost" data-reload="areas">تحديث</button>
         </div>
+        <p class="login-sub" style="margin-top:0">هذه الأسماء للعرض وحده: الزبون لا يسأله التطبيق عن حيه، ولا يظهر صاحب توصيل ولا يحجب باسم منطقة. الذي يُظهره دائرة نصف قطرها كيلومتر واحد حول موقعه، وقرار المشرف بالفترة السارية. وأحواء نواكشوط أكثر من أن تحصىها جدول، فلا تعد ناحيتك غائبة لأنها لم تكتب هنا.</p>
         <div class="table-card">
           <table>
             <thead>
@@ -348,7 +377,7 @@
           <p class="login-sub" style="margin-top:0">
             الموظف الجديد يضغط «طلب صلاحية مشرف» في شاشة الدخول فيُنشئ حسابه ويظهر طلبه هنا، ثم تقبله فيصير مشرفاً.
             لا يمكن لأي شخص أن يصبح مشرفاً من تلقاء نفسه. وإن كان الرجلُ عندك وتحتاجه يعمل اليوم فأنشئْه بيدك من «إضافة مشرف» —
-            ببريدٍ حقيقيّ وكلمةٍ مؤقّتة ودرجةٍ تختارها، فدرجةُ المالك لا تُمنح من هنا.
+            ببريدٍ حقيقيّ وكلمةٍ مؤقّتة ودرجةٍ تختارها، فدرجةُ المالك لا تُمنح من هنا. فحسابُ المالكِ القائمُ لا يُحذَفُ ولا تُبدَّلُ درجتُه من اللوحةِ كلِّها: به تُعرَفُ اليدُ التي تُعيِّنُ وتُعزِل، ولو ضاعَ لبقيتِ اللوحةُ بلا حارسٍ يُسترجَعُ إلا من خارجِها.
           </p>
         </div>
         <div class="table-card">
@@ -415,6 +444,6 @@
 
   <div id="modal-root"></div>
   <div id="toast" class="toast hidden"></div>
-  <script src="app.js?v=20261025j"></script>
+  <script src="app.js?v=20261026c"></script>
 </body>
 </html>
